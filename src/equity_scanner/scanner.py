@@ -1,18 +1,32 @@
 """Core scan-ranking logic, ported from ButterflyGuy's equity_scan/scanner.py.
 
 This logic is provider-agnostic in the original (it takes dicts/dataclasses, not a
-Schwab client) — that's what makes this port mechanical. News/catalyst-watch support
-is dropped: news fetching (SEC/Alpha Vantage) is explicitly Phase 2, so the `news`
-field, `attach_news_impacts`, `rank_catalyst_watch`, and the news-scoring terms in
-opening-focus ranking are removed rather than carried as dead weight.
+Schwab client) — that's what makes this port mechanical, with one exception: quote
+parsing. ButterflyGuy fed `parse_equity_quote` a raw two-session Schwab payload
+(`{"quote": {...regular...}, "extended": {...premarket...}}`) and picked the fresher
+side itself via `_price_choice`. SchwabGateway's `/v1/quotes` returns a flat,
+already-session-resolved `QuoteV1` instead — the gateway does that freshness pick
+server-side (see SchwabGateway's `normalize_schwab_quote`) and reports the winner in
+`quote.session`, plus `quote.close`/`quote.net_percent_change` sourced specifically
+from the regular session regardless of which session won. `_price_choice` and
+`parse_equity_quote` are rewritten around that flat shape below; two real behavior
+changes fall out of it (documented on `parse_equity_quote`), not just a mechanical
+port.
+
+News/catalyst-watch support (dropped in Phase 1 as explicitly out of scope) is
+restored here: the `news` field on `EquitySnapshot`, `attach_news_impacts`,
+`rank_catalyst_watch`, and the news-scoring term in opening-focus ranking.
 """
 
 from __future__ import annotations
 
 import datetime as dt
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
+from schwab_gateway_sdk import QuoteV1
+
+from equity_scanner.news import NewsImpact
 from equity_scanner.scan_config import EquityScanSettings
 from equity_scanner.time_utils import is_market_open, is_premarket_window
 
@@ -37,6 +51,7 @@ class EquitySnapshot:
     quote_age_seconds: float | None = None
     reference_price: float | None = None
     data_quality_flags: tuple[str, ...] = ()
+    news: NewsImpact | None = None
 
 
 @dataclass(frozen=True)
@@ -56,6 +71,7 @@ class MarketContext:
 @dataclass(frozen=True)
 class ScanResults:
     opening_focus: list[OpeningFocusItem]
+    catalyst_watch: list[EquitySnapshot]
     prior_gainers: list[EquitySnapshot]
     prior_losers: list[EquitySnapshot]
     premarket_gainers: list[EquitySnapshot]
@@ -87,16 +103,10 @@ def _as_int(value: Any) -> int:
         return 0
 
 
-def _mid_bid_ask(payload: dict[str, Any]) -> float | None:
-    bid = _as_float(payload.get("bidPrice"))
-    ask = _as_float(payload.get("askPrice"))
-    if bid is None or ask is None or bid <= 0 or ask <= 0:
+def _event_time_ms(event_timestamp: dt.datetime | None) -> int | None:
+    if event_timestamp is None:
         return None
-    return (bid + ask) / 2.0
-
-
-def _quote_trade_time_ms(payload: dict[str, Any]) -> int:
-    return _as_int(payload.get("tradeTime"))
+    return int(event_timestamp.timestamp() * 1000)
 
 
 def _quote_age_seconds(
@@ -109,52 +119,28 @@ def _quote_age_seconds(
     return max(0.0, (generated_at.astimezone(dt.timezone.utc) - ts).total_seconds())
 
 
-def _price_choice(
-    quote: dict[str, Any],
-    extended: dict[str, Any],
-    *,
-    in_premarket: bool,
-) -> tuple[float | None, str, int | None]:
-    """Pick the best current price; during premarket prefer the fresher quote side."""
-    regular = _as_float(quote.get("lastPrice")) or _as_float(quote.get("mark"))
-    extended_px = _as_float(extended.get("lastPrice")) or _as_float(extended.get("mark"))
-
-    if not in_premarket:
-        if regular:
-            return regular, "quote.lastPrice_or_mark", _quote_trade_time_ms(quote) or None
-        return extended_px, "extended.lastPrice_or_mark", _quote_trade_time_ms(extended) or None
-
-    ext_time = _quote_trade_time_ms(extended)
-    reg_time = _quote_trade_time_ms(quote)
-    if ext_time and reg_time:
-        if ext_time >= reg_time:
-            if extended_px:
-                return extended_px, "extended.lastPrice_or_mark", ext_time
-            if regular:
-                return regular, "quote.lastPrice_or_mark", reg_time
-            if mid := _mid_bid_ask(extended):
-                return mid, "extended.bid_ask_mid", ext_time
-            return _mid_bid_ask(quote), "quote.bid_ask_mid", reg_time
-        if regular:
-            return regular, "quote.lastPrice_or_mark", reg_time
-        if extended_px:
-            return extended_px, "extended.lastPrice_or_mark", ext_time
-        if mid := _mid_bid_ask(quote):
-            return mid, "quote.bid_ask_mid", reg_time
-        return _mid_bid_ask(extended), "extended.bid_ask_mid", ext_time
-
-    if extended_px:
-        return extended_px, "extended.lastPrice_or_mark", ext_time or None
-    if regular:
-        return regular, "quote.lastPrice_or_mark", reg_time or None
-    if mid := _mid_bid_ask(extended):
-        return mid, "extended.bid_ask_mid", ext_time or None
-    return _mid_bid_ask(quote), "quote.bid_ask_mid", reg_time or None
+def _price_choice(quote: QuoteV1) -> tuple[float | None, str, int | None]:
+    """Pick the best current price from a flat, already session-resolved gateway
+    quote. The gateway has already chosen the fresher of regular/extended and
+    reports the winner in `quote.session` — there is no separate regular-vs-extended
+    comparison left to do here, unlike ButterflyGuy's two-payload `_price_choice`."""
+    session = quote.session or "unknown"
+    price_time_ms = _event_time_ms(quote.event_timestamp)
+    # Explicit `is not None and > 0` rather than truthy checks: a truthy check
+    # silently accepts a bad negative price (only 0.0 is falsy) and treats it as
+    # good data, where falling through to a better source is what we actually want.
+    if quote.last is not None and quote.last > 0:
+        return quote.last, f"{session}.last", price_time_ms
+    if quote.mark is not None and quote.mark > 0:
+        return quote.mark, f"{session}.mark", price_time_ms
+    if quote.bid is not None and quote.bid > 0 and quote.ask is not None and quote.ask > 0:
+        return (quote.bid + quote.ask) / 2.0, f"{session}.bid_ask_mid", price_time_ms
+    return None, session, price_time_ms
 
 
 def parse_equity_quote(
     symbol: str,
-    payload: dict[str, Any],
+    quote: QuoteV1,
     *,
     universes: set[str],
     sector: str = "Unknown",
@@ -167,45 +153,54 @@ def parse_equity_quote(
     prior_day_pct_override: float | None = None,
     reject_reasons: list[dict[str, Any]] | None = None,
 ) -> EquitySnapshot | None:
-    """Normalize a Schwab quote payload into an EquitySnapshot."""
-    quote = payload.get("quote", {})
-    extended = payload.get("extended", {})
+    """Normalize a gateway QuoteV1 into an EquitySnapshot.
 
-    prior_close = _as_float(quote.get("closePrice"))
+    Two behavior changes vs. ButterflyGuy's original, both consequences of the flat
+    quote shape (see module docstring):
+
+    - The regular-move-vs-official-netPercentChange sanity check
+      (`max_price_disagreement_pct`) only runs when `quote.session == "regular"`,
+      since a separate regular-session price to compare against is no longer
+      available once the gateway has resolved to the extended session. During
+      premarket this guard is unavailable — a real coverage loss, not a bug.
+    - `volume`/`premarket_volume` come from the single volume figure the gateway
+      reports for whichever session won, not a simultaneous regular+extended pair.
+      During premarket, `volume` reflects extended-session cumulative volume, not
+      the prior full trading day's total the way it did before.
+    """
+    prior_close = quote.close
     if prior_close is None or prior_close <= 0:
         if reject_reasons is not None:
             reject_reasons.append({"symbol": symbol, "reason": "missing_prior_close"})
         return None
 
-    regular_price = _as_float(quote.get("lastPrice")) or _as_float(quote.get("mark"))
-    price, price_source, price_time_ms = _price_choice(quote, extended, in_premarket=in_premarket)
+    price, price_source, price_time_ms = _price_choice(quote)
     if price is None or price <= 0:
         if reject_reasons is not None:
             reject_reasons.append({"symbol": symbol, "reason": "missing_live_price"})
         return None
 
-    quote_net_percent_change = _as_float(quote.get("netPercentChange"))
-    prior_day_pct = quote_net_percent_change
+    prior_day_pct = quote.net_percent_change
     if prior_day_pct is None:
-        prior_day_pct = ((regular_price or price) - prior_close) / prior_close * 100.0
+        prior_day_pct = (price - prior_close) / prior_close * 100.0
 
     session_gap_pct = (price - prior_close) / prior_close * 100.0
-    flags: list[str] = []
+    flags: list[str] = list(quote.data_quality_flags)
     if (
-        regular_price
-        and quote_net_percent_change is not None
+        quote.session == "regular"
+        and quote.net_percent_change is not None
         and max_price_disagreement_pct is not None
     ):
-        regular_move_pct = (regular_price - prior_close) / prior_close * 100.0
-        if abs(regular_move_pct - quote_net_percent_change) > max_price_disagreement_pct:
+        regular_move_pct = (price - prior_close) / prior_close * 100.0
+        if abs(regular_move_pct - quote.net_percent_change) > max_price_disagreement_pct:
             if reject_reasons is not None:
                 reject_reasons.append(
                     {
                         "symbol": symbol,
                         "reason": "quote_percent_disagreement",
                         "regular_move_pct": regular_move_pct,
-                        "net_percent_change": quote_net_percent_change,
-                        "price": regular_price,
+                        "net_percent_change": quote.net_percent_change,
+                        "price": price,
                         "prior_close": prior_close,
                     }
                 )
@@ -227,15 +222,15 @@ def parse_equity_quote(
                     }
                 )
             return None
-    if (
-        in_premarket
-        and price_source.startswith("extended")
-        and _as_int(extended.get("totalVolume")) <= 0
-    ):
-        flags.append("extended_price_without_volume")
 
-    volume = _as_int(quote.get("totalVolume"))
-    premarket_volume = _as_int(extended.get("totalVolume"))
+    volume = _as_int(quote.volume)
+    # Gated on in_premarket, not just session=="extended": the gateway reports
+    # "extended" whenever extended is fresher than regular, which is true after the
+    # 4pm close as much as before the 9:30am open — without this gate, an after-hours
+    # run would mislabel post-close volume as a premarket rvol/gap signal.
+    premarket_volume = volume if (in_premarket and quote.session == "extended") else 0
+    if in_premarket and quote.session == "extended" and premarket_volume <= 0:
+        flags.append("extended_price_without_volume")
     rvol = _compute_rvol(premarket_volume, avg_volume_20d)
 
     return EquitySnapshot(
@@ -337,7 +332,7 @@ def filter_movers(
 
 
 def build_snapshots(
-    quotes: dict[str, dict[str, Any]],
+    quotes: dict[str, QuoteV1],
     symbol_map: dict[str, set[str]],
     settings: EquityScanSettings,
     *,
@@ -355,14 +350,14 @@ def build_snapshots(
     reference_prices = reference_prices or {}
     prior_day_changes = prior_day_changes or {}
     snapshots: list[EquitySnapshot] = []
-    for symbol, payload in quotes.items():
+    for symbol, quote in quotes.items():
         universes = symbol_map.get(symbol)
         if not universes:
             continue
         reject_reasons: list[dict[str, Any]] = []
         snapshot = parse_equity_quote(
             symbol,
-            payload,
+            quote,
             universes=universes,
             sector=sector_map.get(symbol, "Unknown"),
             avg_volume_20d=avg_volumes.get(symbol),
@@ -389,6 +384,19 @@ def build_snapshots(
     return snapshots
 
 
+def attach_news_impacts(
+    snapshots: list[EquitySnapshot],
+    news_impacts: dict[str, NewsImpact],
+) -> list[EquitySnapshot]:
+    """Attach catalyst metadata without changing quote normalization."""
+    if not news_impacts:
+        return snapshots
+    return [
+        replace(snapshot, news=news_impacts.get(snapshot.symbol, snapshot.news))
+        for snapshot in snapshots
+    ]
+
+
 def _focus_reasons(
     snapshot: EquitySnapshot,
     settings: EquityScanSettings,
@@ -405,11 +413,7 @@ def _focus_reasons(
     )
     if gap_ok and volume_ok:
         reasons.append("gap with volume")
-    if (
-        prior_ok
-        and gap_ok
-        and snapshot.prior_day_pct * snapshot.session_gap_pct > 0
-    ):
+    if prior_ok and gap_ok and snapshot.prior_day_pct * snapshot.session_gap_pct > 0:
         reasons.append("continuation setup")
     if (
         abs(snapshot.prior_day_pct) >= filters.prior_day_min_pct
@@ -423,6 +427,8 @@ def _focus_reasons(
         reasons.append("sector cluster")
     if snapshot.data_quality_flags:
         reasons.append("data flag")
+    if snapshot.news is not None and snapshot.news.score >= settings.news.min_score_for_focus:
+        reasons.append("news catalyst")
     return tuple(reasons)
 
 
@@ -449,6 +455,7 @@ def rank_opening_focus(
         custom_score = 6.0 if "custom" in snapshot.universes else 0.0
         index_score = 2.0 if INDEX_UNIVERSES & set(snapshot.universes) else 0.0
         sector_score = 3.0 if "sector cluster" in reasons else 0.0
+        news_score = snapshot.news.score if snapshot.news is not None else 0.0
         score = (
             abs(snapshot.session_gap_pct) * 2.0
             + abs(snapshot.prior_day_pct)
@@ -456,9 +463,27 @@ def rank_opening_focus(
             + custom_score
             + index_score
             + sector_score
+            + news_score
         )
         items.append(OpeningFocusItem(snapshot=snapshot, score=score, reasons=reasons))
     return sorted(items, key=lambda item: item.score, reverse=True)[: settings.limits.opening_focus]
+
+
+def rank_catalyst_watch(
+    snapshots: list[EquitySnapshot],
+    *,
+    settings: EquityScanSettings,
+) -> list[EquitySnapshot]:
+    catalysts = [snapshot for snapshot in snapshots if snapshot.news is not None]
+    return sorted(
+        catalysts,
+        key=lambda snap: (
+            snap.news.score if snap.news is not None else 0.0,
+            abs(snap.session_gap_pct),
+            abs(snap.prior_day_pct),
+        ),
+        reverse=True,
+    )[: settings.limits.catalyst_watch]
 
 
 def _top(
@@ -477,10 +502,9 @@ def _top(
     return sorted(filtered, key=lambda snap: getattr(snap, key), reverse=reverse)[:limit]
 
 
-def parse_market_context(symbol: str, payload: dict[str, Any]) -> MarketContext | None:
-    quote = payload.get("quote", {})
-    price = _as_float(quote.get("lastPrice")) or _as_float(quote.get("mark"))
-    change_pct = _as_float(quote.get("netPercentChange"))
+def parse_market_context(symbol: str, quote: QuoteV1) -> MarketContext | None:
+    price = quote.last or quote.mark
+    change_pct = quote.net_percent_change
     if price is None or change_pct is None:
         return None
     return MarketContext(symbol=symbol, price=price, change_pct=change_pct)
@@ -550,6 +574,7 @@ def rank_scan_results(
 
     return ScanResults(
         opening_focus=rank_opening_focus(snapshots, settings=settings),
+        catalyst_watch=rank_catalyst_watch(snapshots, settings=settings),
         prior_gainers=prior_gainers,
         prior_losers=prior_losers,
         premarket_gainers=premarket_gainers,

@@ -7,9 +7,10 @@ and market movers. Not a general-purpose gateway client wrapper.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
-from schwab_gateway_sdk import GatewayMarketDataClient
+from schwab_gateway_sdk import GatewayMarketDataClient, QuoteV1
 
 
 def _bar_to_candle(bar: Any) -> dict[str, Any]:
@@ -50,6 +51,37 @@ class GatewayEquityDataProvider:
         deliberately sized for the 20-day rvol lookback these callers use."""
         response = await self._client.get_history(symbol, frequency="daily", days_back=days_back)
         return [_bar_to_candle(bar) for bar in response.history.bars]
+
+    async def get_equity_quotes(
+        self,
+        symbols: list[str],
+        *,
+        batch_size: int = 100,
+        concurrency: int = 4,
+    ) -> dict[str, QuoteV1]:
+        """symbol -> flat gateway quote, for universes.py's liquidity filter and
+        scanner.py's parse_equity_quote. Batches into chunks of at most 100 (the
+        gateway's /v1/quotes per-request cap, MAX_SYMBOLS in SchwabGateway's api.py)
+        and dedupes, since ButterflyGuy's raw Schwab client allowed larger/duplicate
+        batches that the gateway's contract does not accept."""
+        unique_symbols = list(dict.fromkeys(symbols))
+        if not unique_symbols:
+            return {}
+        batch_size = min(batch_size, 100)
+        chunks = [
+            unique_symbols[i : i + batch_size] for i in range(0, len(unique_symbols), batch_size)
+        ]
+        sem = asyncio.Semaphore(concurrency)
+        quotes: dict[str, QuoteV1] = {}
+
+        async def _fetch(chunk: list[str]) -> None:
+            async with sem:
+                response = await self._client.get_quotes(chunk)
+                for quote in response.quotes:
+                    quotes[quote.symbol] = quote
+
+        await asyncio.gather(*(_fetch(chunk) for chunk in chunks))
+        return quotes
 
     async def get_market_movers(
         self,

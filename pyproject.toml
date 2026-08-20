@@ -1,14 +1,20 @@
 [project]
 name = "equity-scanner"
-version = "0.1.0"
-description = "Equity morning-scan logic running against SchwabGateway (Phase 1: gateway-backed provider + scan ranking, no orchestration/Discord/news/universes yet)"
+version = "0.2.0"
+description = "Equity morning-scan running against SchwabGateway: universes, news, Discord reporting, and full CLI orchestration (Phase 2)"
 requires-python = ">=3.12"
 dependencies = [
+    "aiohttp>=3.10.0",
     "httpx>=0.27.0",
     "pydantic>=2.9.0",
     "pydantic-settings>=2.6.0",
+    "pyyaml>=6.0.0",
     "schwab-gateway-sdk",
 ]
+
+[project.scripts]
+equity-scanner-run = "equity_scanner.run:main"
+equity-scanner-refresh-universes = "equity_scanner.refresh_universes:main"
 
 [tool.uv.sources]
 schwab-gateway-sdk = { git = "https://github.com/hollowc2/SchwabGateway.git", branch = "main", subdirectory = "packages/sdk" }

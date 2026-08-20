@@ -1,4 +1,7 @@
-"""Environment configuration for the gateway connection. Fails closed."""
+"""Environment configuration. Gateway credentials fail closed (required); Phase 2's
+news/Discord secrets are optional here since news providers and Discord posting are
+each meant to degrade gracefully when unconfigured (skip that provider, refuse only
+at the point a live post/fetch is actually attempted — see run.py)."""
 
 from __future__ import annotations
 
@@ -13,6 +16,13 @@ class AppSettings(BaseSettings):
 
     gateway_url: str = Field(validation_alias="SCHWAB_GATEWAY_URL")
     gateway_api_key: SecretStr = Field(validation_alias="SCHWAB_GATEWAY_API_KEY")
+    sec_user_agent: str | None = Field(default=None, validation_alias="SEC_USER_AGENT")
+    alpha_vantage_api_key: SecretStr | None = Field(
+        default=None, validation_alias="ALPHA_VANTAGE_API_KEY"
+    )
+    discord_webhook_url: str | None = Field(
+        default=None, validation_alias="EQUITY_SCANNER_DISCORD_WEBHOOK_URL"
+    )
 
     @field_validator("gateway_url")
     @classmethod

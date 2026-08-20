@@ -6,6 +6,7 @@ import datetime as dt
 
 import httpx
 import pytest
+from schwab_gateway_sdk import QuoteV1
 
 from equity_scanner.config import AppSettings
 from equity_scanner.gateway import build_gateway_client
@@ -123,46 +124,51 @@ MOVERS_DOWN_PAYLOAD = {
 }
 
 
-def _quote_payload(
+def _quote(
     *,
-    prior_close: float,
-    last_price: float,
-    total_volume: int,
-    extended_price: float | None = None,
-    extended_volume: int = 0,
-) -> dict:
-    quote: dict = {
-        "closePrice": prior_close,
-        "lastPrice": last_price,
-        "totalVolume": total_volume,
-        "tradeTime": 1_000,
-    }
-    extended: dict = {}
-    if extended_price is not None:
-        extended = {
-            "lastPrice": extended_price,
-            "totalVolume": extended_volume,
-            "tradeTime": 2_000,
-        }
-    return {"quote": quote, "extended": extended}
+    session: str | None,
+    close: float,
+    last: float,
+    net_percent_change: float,
+    volume: int,
+) -> QuoteV1:
+    """A flat, already session-resolved gateway quote — see scanner.py's module
+    docstring on why this replaced ButterflyGuy's two-payload {"quote", "extended"}
+    shape. `net_percent_change` is always sourced from the regular session by the
+    gateway (regardless of which session `session` reports), which is what lets
+    prior_day_pct stay distinct from session_gap_pct even when `session=="extended"`."""
+    return QuoteV1(
+        symbol="TEST",
+        gateway_received_at=dt.datetime(2026, 8, 19, tzinfo=dt.timezone.utc),
+        source="test",
+        session=session,
+        close=close,
+        last=last,
+        net_percent_change=net_percent_change,
+        volume=volume,
+        stale=False,
+    )
 
 
 QUOTES = {
-    "AAPL": _quote_payload(
-        prior_close=100.0, last_price=100.2, total_volume=600_000,
-        extended_price=108.0, extended_volume=400_000,  # +8% premarket gap
+    # +8% premarket gap; volume alone (there's only one figure now, see scanner.py's
+    # module docstring) clears the 500k min_volume filter.
+    "AAPL": _quote(
+        session="extended", close=100.0, last=108.0, net_percent_change=0.2, volume=600_000
     ),
-    "MSFT": _quote_payload(
-        prior_close=200.0, last_price=199.0, total_volume=550_000,
-        extended_price=188.0, extended_volume=250_000,  # -6% premarket gap
+    # -6% premarket gap.
+    "MSFT": _quote(
+        session="extended", close=200.0, last=188.0, net_percent_change=-0.5, volume=550_000
     ),
-    "GOOG": _quote_payload(
-        prior_close=150.0, last_price=150.3, total_volume=520_000,
-        extended_price=150.9, extended_volume=0,  # +0.6% gap: too small, no premarket volume
+    # No extended-session data at all (session stayed "regular"): +0.2% is too small a
+    # gap regardless, and no premarket volume means no rvol fetch.
+    "GOOG": _quote(
+        session="regular", close=150.0, last=150.3, net_percent_change=0.2, volume=520_000
     ),
-    "TSLA": _quote_payload(
-        prior_close=50.0, last_price=50.1, total_volume=1_000,  # fails min_volume filter
-        extended_price=53.0, extended_volume=0,  # no premarket volume: excluded from rvol fetch too
+    # Extended session won but with zero volume: fails min_volume (0 < 500k) and is
+    # excluded from the rvol fetch (needs volume > 0), both from the same figure.
+    "TSLA": _quote(
+        session="extended", close=50.0, last=53.0, net_percent_change=0.2, volume=0
     ),
 }
 
@@ -195,7 +201,7 @@ async def test_gateway_backed_scan_produces_sane_ranked_output(gateway_client) -
     provider = GatewayEquityDataProvider(gateway_client)
     settings = EquityScanSettings(include_movers=True)
 
-    rvol_symbols = symbols_needing_rvol_fetch(QUOTES)
+    rvol_symbols = symbols_needing_rvol_fetch(QUOTES, in_premarket=True)
     # GOOG/TSLA excluded: no/irrelevant premarket volume signal
     assert rvol_symbols == ["AAPL", "MSFT"]
 
@@ -220,8 +226,8 @@ async def test_gateway_backed_scan_produces_sane_ranked_output(gateway_client) -
     assert set(by_symbol) == {"AAPL", "MSFT", "GOOG"}  # TSLA filtered out
     assert rejected_symbols == {"filter_failed": 1}
 
-    assert by_symbol["AAPL"].rvol == pytest.approx(400_000 / 500_000)
-    assert by_symbol["MSFT"].rvol == pytest.approx(250_000 / 1_000_000)
+    assert by_symbol["AAPL"].rvol == pytest.approx(600_000 / 500_000)
+    assert by_symbol["MSFT"].rvol == pytest.approx(550_000 / 1_000_000)
     assert by_symbol["GOOG"].rvol is None  # no premarket volume, no avg_volume fetched
 
     movers_up = await provider.get_market_movers("NASDAQ", sort_order="PERCENT_CHANGE_UP")

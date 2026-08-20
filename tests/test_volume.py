@@ -1,5 +1,7 @@
 import datetime as dt
 
+from schwab_gateway_sdk import QuoteV1
+
 from equity_scanner.volume import (
     avg_daily_volume,
     compute_rvol,
@@ -56,14 +58,31 @@ def test_compute_rvol() -> None:
     assert compute_rvol(500_000, None) is None
 
 
+def _quote(*, session: str | None, volume: int | None) -> QuoteV1:
+    return QuoteV1(
+        symbol="TEST",
+        gateway_received_at=dt.datetime.now(dt.timezone.utc),
+        source="test",
+        session=session,
+        volume=volume,
+        stale=False,
+    )
+
+
 def test_symbols_needing_rvol_fetch_only_includes_premarket_volume() -> None:
     quotes = {
-        "AAPL": {"extended": {"totalVolume": 10_000}},
-        "MSFT": {"extended": {"totalVolume": 0}},
-        "NVDA": {"extended": {}},
+        "AAPL": _quote(session="extended", volume=10_000),
+        "MSFT": _quote(session="extended", volume=0),
+        "NVDA": _quote(session="regular", volume=10_000),  # not extended: excluded
     }
 
-    assert symbols_needing_rvol_fetch(quotes) == ["AAPL"]
+    assert symbols_needing_rvol_fetch(quotes, in_premarket=True) == ["AAPL"]
+
+
+def test_symbols_needing_rvol_fetch_returns_nothing_outside_premarket() -> None:
+    quotes = {"AAPL": _quote(session="extended", volume=10_000)}
+
+    assert symbols_needing_rvol_fetch(quotes, in_premarket=False) == []
 
 
 async def test_fetch_avg_volumes_uses_provider_per_symbol() -> None:

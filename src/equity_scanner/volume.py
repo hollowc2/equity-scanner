@@ -9,6 +9,8 @@ import asyncio
 import datetime as dt
 from typing import Protocol
 
+from schwab_gateway_sdk import QuoteV1
+
 
 class DailyBarsProvider(Protocol):
     async def get_daily_bars(self, symbol: str, days_back: int | None = None) -> list[dict]: ...
@@ -78,12 +80,24 @@ def compute_rvol(premarket_volume: int, avg_volume: float | None) -> float | Non
     return premarket_volume / avg_volume
 
 
-def symbols_needing_rvol_fetch(quotes: dict[str, dict]) -> list[str]:
-    """Symbols with premarket volume — only these need avg-volume for RVOL filter."""
+def symbols_needing_rvol_fetch(quotes: dict[str, QuoteV1], *, in_premarket: bool) -> list[str]:
+    """Symbols with premarket volume — only these need avg-volume for RVOL filter.
+
+    Adapted for the gateway's flat QuoteV1: ButterflyGuy's raw payload carried
+    regular and extended volume simultaneously and checked extended's directly. The
+    gateway keeps only one volume figure, for whichever session it resolved as
+    freshest, so a symbol needs rvol data whenever that session was "extended" with
+    nonzero volume (see SchwabGateway's normalize_schwab_quote). Also requires
+    `in_premarket`: the gateway reports "extended" post-close just as much as
+    pre-open, and rvol is specifically a premarket-activity signal — without this
+    gate, an after-hours run would fetch avg-volume for symbols showing only
+    after-hours activity, not premarket."""
+    if not in_premarket:
+        return []
     return sorted(
         symbol
-        for symbol, payload in quotes.items()
-        if _as_int(payload.get("extended", {}).get("totalVolume")) > 0
+        for symbol, quote in quotes.items()
+        if quote.session == "extended" and (quote.volume or 0) > 0
     )
 
 
