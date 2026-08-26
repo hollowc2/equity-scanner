@@ -4,6 +4,10 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 dist/
+reports/
+data/universes/*.txt
+data/universes/*.json
+.candidate-image
 .env
 .env.*
 !.env.example

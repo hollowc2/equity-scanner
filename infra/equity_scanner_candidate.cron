@@ -1,0 +1,3 @@
+# Candidate only. Install after same-session parity approval.
+# Two UTC slots cover 06:00 Pacific across DST; the wrapper enforces local time.
+0 13,14 * * 1-5 /opt/equity-scanner/tools/run_morning_scan_cron.sh >> /opt/equity-scanner/reports/candidate.log 2>&1

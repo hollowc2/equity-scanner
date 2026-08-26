@@ -86,3 +86,7 @@ uv run ruff check .
 Deployment and schedule migration require separate approval. The current candidate
 gateway is never modified by this project. See `docs/dependency-map.md` for the
 extraction boundary and documented behavior differences.
+
+`compose.candidate.yml` is a dry-run-only, one-shot candidate definition. It requires
+an immutable `EQUITY_SCANNER_IMAGE` and an external scanner-owned secret env file.
+`infra/equity_scanner_candidate.cron` remains uninstalled until same-session parity.
