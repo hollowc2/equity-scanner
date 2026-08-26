@@ -1,0 +1,6 @@
+[
+  {"symbol":"WIN","close":100.0,"last":110.0,"net_pct":10.0,"volume":1000000,"session":"regular"},
+  {"symbol":"LOSE","close":100.0,"last":90.0,"net_pct":-10.0,"volume":1200000,"session":"regular"},
+  {"symbol":"FLAT","close":100.0,"last":101.0,"net_pct":1.0,"volume":900000,"session":"regular"},
+  {"symbol":"CHEAP","close":4.0,"last":4.5,"net_pct":12.5,"volume":1000000,"session":"regular"}
+]

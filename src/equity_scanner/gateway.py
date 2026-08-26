@@ -17,5 +17,6 @@ def build_gateway_client(
     return GatewayMarketDataClient(
         base_url=settings.gateway_url,
         api_key=settings.gateway_api_key.get_secret_value(),
+        timeout_seconds=settings.gateway_timeout_seconds,
         client=client,
     )

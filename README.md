@@ -4,14 +4,10 @@ Migrating ButterflyGuy's embedded equity scanner
 (`Butterflyguy/src/butterfly_guy/equity_scan/`) off a direct `SchwabClientWrapper`
 onto [SchwabGateway](https://github.com/hollowc2/SchwabGateway)'s read-only HTTP API.
 
-**Phase 1** built a gateway-backed data provider, ported volume/rvol helpers, and
-provider-agnostic scan-ranking logic, proven against fakes — no universes, no news,
-no Discord, no orchestration CLI, no Helios deployment.
-
-**Phase 2** (this) takes it to a runnable morning scan: universe fetching (S&P 500,
+This standalone extraction provides a runnable morning scan: universe fetching (S&P 500,
 Nasdaq-100, a liquidity-filtered universe, and a custom watchlist), news enrichment
 (SEC EDGAR + Alpha Vantage), Discord reporting, and a CLI that wires it all together
-end to end — still gateway-backed, still not touching ButterflyGuy. Helios deployment
+end to end. It is gateway-backed and has no runtime dependency on ButterflyGuy. Helios deployment
 is out of scope for this repo's code and is a separate, explicitly gated checkpoint
 (see Deployment below) — not something either phase does automatically.
 
@@ -70,6 +66,8 @@ uv run equity-scanner-run --open-scan     # include after-open Schwab mover buck
 
 Both accept `--scan-config path/to/equity_scan.yaml`; unset fields fall back to
 `scan_config.py`'s defaults. See `.env.example` for the required/optional secrets.
+The checked-in config is `configs/equity_scan.yaml`; all external actions are disabled
+by using `--dry-run`.
 
 ## Testing
 
@@ -80,13 +78,11 @@ Schwab credentials, no running gateway, no live network calls.
 
 ```
 uv run pytest
+uv run ruff check .
 ```
 
 ## Deployment
 
-Not part of this repo's code changes. SchwabGateway needs to actually be deployed
-with the quotes/history/movers routes live (check current Helios status before
-assuming), and equity-scanner needs its own deploy story (container/cron/scheduler —
-AfterHoursLab's `compose.yml`/`Dockerfile` is the closest existing pattern). Treat
-"ready to deploy" and "actually deployed" as separate checkpoints — get sign-off
-before either gateway release-tagging or standing up equity-scanner's own deployment.
+Deployment and schedule migration require separate approval. The current candidate
+gateway is never modified by this project. See `docs/dependency-map.md` for the
+extraction boundary and documented behavior differences.

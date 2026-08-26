@@ -107,7 +107,11 @@ async def run_scan(
         )
 
     async with build_gateway_client(app_settings) as gateway:
-        provider = GatewayEquityDataProvider(gateway)
+        provider = GatewayEquityDataProvider(
+            gateway,
+            max_attempts=app_settings.gateway_max_attempts,
+            retry_backoff_seconds=app_settings.gateway_retry_backoff_seconds,
+        )
         log.info(
             "equity_scan_start universes=%s symbols=%d",
             scan_config.universes,

@@ -104,8 +104,8 @@ async def test_get_daily_bars_converts_gateway_bars_to_candle_dicts(gateway_clie
     assert candles[0]["close"] == 100.0
     assert candles[0]["volume"] == 1_000_000
     assert isinstance(candles[0]["datetime"], int)
-    # days_back left unset so the gateway's own default (20, matching the rvol lookback) applies
-    assert "days_back" not in captured["last"].url.params
+    assert captured["last"].url.params["frequency"] == "daily"
+    assert captured["last"].url.params["days_back"] == "20"
 
 
 async def test_get_market_movers_converts_direction_and_shape(gateway_client) -> None:

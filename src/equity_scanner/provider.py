@@ -8,9 +8,21 @@ and market movers. Not a general-purpose gateway client wrapper.
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any
 
 from schwab_gateway_sdk import GatewayMarketDataClient, QuoteV1
+from schwab_gateway_sdk.client import (
+    GatewayCapacityError,
+    GatewayTimeoutError,
+    GatewayUnavailableError,
+)
+
+log = logging.getLogger(__name__)
+
+
+class StaleGatewayDataError(RuntimeError):
+    """Raised when the gateway explicitly marks a response stale."""
 
 
 def _bar_to_candle(bar: Any) -> dict[str, Any]:
@@ -42,14 +54,40 @@ def _mover_to_dict(mover: Any) -> dict[str, Any]:
 class GatewayEquityDataProvider:
     """Delegates to GatewayMarketDataClient without owning its lifecycle."""
 
-    def __init__(self, client: GatewayMarketDataClient) -> None:
+    def __init__(
+        self,
+        client: GatewayMarketDataClient,
+        *,
+        max_attempts: int = 3,
+        retry_backoff_seconds: float = 0.25,
+    ) -> None:
         self._client = client
+        self._max_attempts = max_attempts
+        self._retry_backoff_seconds = retry_backoff_seconds
 
-    async def get_daily_bars(self, symbol: str, days_back: int | None = None) -> list[dict]:
-        """Matches PriceHistoryProvider.get_daily_bars's shape. Leaves days_back unset by
-        default so the gateway's own default (20 daily bars) applies — that default is
-        deliberately sized for the 20-day rvol lookback these callers use."""
-        response = await self._client.get_history(symbol, frequency="daily", days_back=days_back)
+    async def _retry(self, operation):
+        for attempt in range(1, self._max_attempts + 1):
+            try:
+                return await operation()
+            except (GatewayCapacityError, GatewayTimeoutError, GatewayUnavailableError):
+                if attempt == self._max_attempts:
+                    raise
+                await asyncio.sleep(self._retry_backoff_seconds * (2 ** (attempt - 1)))
+        raise AssertionError("retry loop exhausted")
+
+    @staticmethod
+    def _require_fresh(payload: Any, surface: str) -> None:
+        if payload.stale:
+            raise StaleGatewayDataError(
+                f"gateway returned stale {surface} data (age_seconds={payload.age_seconds})"
+            )
+
+    async def get_daily_bars(self, symbol: str, days_back: int | None = 20) -> list[dict]:
+        """Fetch the scanner's explicit twenty-day daily-history window."""
+        response = await self._retry(
+            lambda: self._client.get_history(symbol, frequency="daily", days_back=days_back)
+        )
+        self._require_fresh(response.history, f"history for {symbol}")
         return [_bar_to_candle(bar) for bar in response.history.bars]
 
     async def get_equity_quotes(
@@ -76,9 +114,19 @@ class GatewayEquityDataProvider:
 
         async def _fetch(chunk: list[str]) -> None:
             async with sem:
-                response = await self._client.get_quotes(chunk)
+                response = await self._retry(lambda: self._client.get_quotes(chunk))
                 for quote in response.quotes:
+                    if quote.stale:
+                        log.warning(
+                            "gateway_quote_rejected symbol=%s reason=stale age_seconds=%s",
+                            quote.symbol,
+                            quote.age_seconds,
+                        )
+                        continue
                     quotes[quote.symbol] = quote
+                missing = sorted(set(chunk) - {quote.symbol for quote in response.quotes})
+                if missing:
+                    log.warning("gateway_quote_batch_partial missing_symbols=%s", ",".join(missing))
 
         await asyncio.gather(*(_fetch(chunk) for chunk in chunks))
         return quotes
@@ -93,5 +141,6 @@ class GatewayEquityDataProvider:
         """Matches MarketMoversProvider.get_market_movers's shape. `frequency` has no
         gateway equivalent and is accepted only for Protocol/call-site compatibility."""
         direction = "down" if "DOWN" in sort_order.upper() else "up"
-        response = await self._client.get_movers(index, direction=direction)
+        response = await self._retry(lambda: self._client.get_movers(index, direction=direction))
+        self._require_fresh(response.movers, f"movers for {index}/{direction}")
         return [_mover_to_dict(mover) for mover in response.movers.movers]
