@@ -15,6 +15,7 @@ dependencies = [
 [project.scripts]
 equity-scanner-run = "equity_scanner.run:main"
 equity-scanner-refresh-universes = "equity_scanner.refresh_universes:main"
+equity-scanner-compare-parity = "equity_scanner.parity:main"
 
 [tool.uv.sources]
 schwab-gateway-sdk = { git = "https://github.com/hollowc2/SchwabGateway.git", rev = "5b8f1d76aa9fb97a300172d39e7afcc4ab60e83a", subdirectory = "packages/sdk" }
