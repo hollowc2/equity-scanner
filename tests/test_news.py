@@ -7,8 +7,10 @@ what's already covered here."""
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 
+from equity_scanner import news
 from equity_scanner.news import (
     NewsImpact,
     _merge_impact,
@@ -116,3 +118,69 @@ def test_merge_news_impacts_dedupes_context():
     assert impact.score == 11.0
     assert impact.reasons == ("recent SEC filing", "upcoming earnings")
     assert impact.providers == ("sec", "alpha_vantage")
+
+
+async def test_sec_fetches_use_bounded_concurrency(monkeypatch):
+    active = 0
+    max_active = 0
+
+    async def fake_ticker_map(_client):
+        return {f"S{i}": i for i in range(6)}
+
+    async def fake_fetch_json(_client, _url, **_params):
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+        return {"filings": {"recent": {}}}
+
+    monkeypatch.setattr(news, "_load_sec_ticker_map", fake_ticker_map)
+    monkeypatch.setattr(news, "_fetch_json", fake_fetch_json)
+    settings = EquityNewsSettings(
+        providers=["sec"],
+        sec_request_concurrency=2,
+        sec_request_interval_seconds=0,
+    )
+
+    await news._fetch_sec_impacts(
+        [f"S{i}" for i in range(6)],
+        settings=settings,
+        generated_at=None,
+    )
+
+    assert max_active == 2
+
+
+async def test_alpha_news_fetches_use_bounded_concurrency(monkeypatch):
+    active = 0
+    max_active = 0
+
+    async def fake_earnings(*_args, **_kwargs):
+        return {}
+
+    async def fake_news(_client, symbol, **_kwargs):
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+        return NewsImpact(symbol=symbol, score=1.0, providers=("alpha_vantage",))
+
+    monkeypatch.setattr(news, "_alpha_key", lambda _settings: "test-key")
+    monkeypatch.setattr(news, "_fetch_alpha_earnings", fake_earnings)
+    monkeypatch.setattr(news, "_fetch_alpha_news_for_symbol", fake_news)
+    settings = EquityNewsSettings(
+        providers=["alpha_vantage"],
+        alpha_vantage_max_news_symbols=6,
+        alpha_vantage_request_concurrency=2,
+    )
+
+    impacts = await news._fetch_alpha_impacts(
+        [f"S{i}" for i in range(6)],
+        settings=settings,
+        generated_at=None,
+    )
+
+    assert max_active == 2
+    assert len(impacts) == 6

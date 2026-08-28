@@ -38,8 +38,11 @@
 
 - Gateway quotes are already flattened to the freshest regular/extended session; the
   raw two-session Schwab payload is not reconstructed.
-- A gateway response marked stale is rejected. Missing symbols in a partial quote batch
-  are logged and omitted, making the partial result explicit without aborting all other
-  symbols.
+- A quote marked stale is retained because Gateway quote freshness reflects the selected
+  trade event; during premarket an old last trade can coexist with otherwise usable quote
+  fields. The scanner exposes this as the `gateway_stale` data-quality flag and still
+  applies its normal field, liquidity, and reference-price validation. Stale history and
+  mover responses remain fail-closed. Missing symbols in a partial quote batch are logged
+  and omitted, making the partial result explicit without aborting all other symbols.
 - Authentication/authorization and malformed-contract failures are fail-closed. Only
   transient capacity, timeout, and upstream-unavailable errors receive bounded retry.

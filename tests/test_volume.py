@@ -22,8 +22,10 @@ def _ms(days_ago: int) -> int:
 class FakeProvider:
     def __init__(self, candles_by_symbol: dict[str, list[dict]]) -> None:
         self._candles_by_symbol = candles_by_symbol
+        self.calls: list[tuple[str, int | None]] = []
 
     async def get_daily_bars(self, symbol: str, days_back: int | None = None) -> list[dict]:
+        self.calls.append((symbol, days_back))
         return self._candles_by_symbol.get(symbol, [])
 
 
@@ -99,6 +101,7 @@ async def test_fetch_avg_volumes_uses_provider_per_symbol() -> None:
     result = await fetch_avg_volumes(provider, ["AAPL", "MSFT"], concurrency=2, lookback_days=2)
 
     assert result == {"AAPL": (1_000_000 + 1_200_000) / 2}
+    assert sorted(provider.calls) == [("AAPL", 2), ("MSFT", 2)]
 
 
 async def test_fetch_prior_day_changes_uses_provider_per_symbol() -> None:
@@ -111,6 +114,7 @@ async def test_fetch_prior_day_changes_uses_provider_per_symbol() -> None:
         }
     )
 
-    result = await fetch_prior_day_changes(provider, ["AAPL"])
+    result = await fetch_prior_day_changes(provider, ["AAPL"], days_back=30)
 
     assert result == {"AAPL": 3.0}
+    assert provider.calls == [("AAPL", 30)]

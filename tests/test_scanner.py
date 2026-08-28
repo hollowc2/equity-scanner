@@ -268,5 +268,23 @@ async def test_gateway_backed_scan_produces_sane_ranked_output(gateway_client) -
     assert [m["symbol"] for m in open_results.movers_down] == ["INTC"]
 
 
+def test_stale_quote_is_visible_as_data_quality_flag() -> None:
+    settings = EquityScanSettings()
+    stale_quote = QUOTES["AAPL"].model_copy(
+        update={"stale": True, "age_seconds": 900.0}
+    )
+
+    snapshots = build_snapshots(
+        {"AAPL": stale_quote},
+        {"AAPL": {"sp500"}},
+        settings,
+        in_premarket=True,
+        generated_at=PREMARKET_AT,
+    )
+
+    assert len(snapshots) == 1
+    assert snapshots[0].data_quality_flags == ("gateway_stale",)
+
+
 def _candle(volume: int) -> dict:
     return {"datetime": 0, "close": 100.0, "volume": volume}

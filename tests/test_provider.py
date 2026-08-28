@@ -1,4 +1,6 @@
+import asyncio
 import datetime as dt
+from typing import Any
 
 import httpx
 import pytest
@@ -75,11 +77,12 @@ MOVERS_PAYLOAD = {
 
 @pytest.fixture
 async def gateway_client():
-    captured: dict[str, httpx.Request] = {}
+    captured: dict[str, Any] = {"history_calls": 0}
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured["last"] = request
         if request.url.path == "/v1/history":
+            captured["history_calls"] += 1
             return httpx.Response(200, json=HISTORY_PAYLOAD)
         if request.url.path == "/v1/movers":
             return httpx.Response(200, json=MOVERS_PAYLOAD)
@@ -106,6 +109,22 @@ async def test_get_daily_bars_converts_gateway_bars_to_candle_dicts(gateway_clie
     assert isinstance(candles[0]["datetime"], int)
     assert captured["last"].url.params["frequency"] == "daily"
     assert captured["last"].url.params["days_back"] == "20"
+
+
+async def test_get_daily_bars_coalesces_and_caches_identical_windows(gateway_client) -> None:
+    gateway, captured = gateway_client
+    provider = GatewayEquityDataProvider(gateway)
+
+    first, second = await asyncio.gather(
+        provider.get_daily_bars("AAPL", days_back=30),
+        provider.get_daily_bars("AAPL", days_back=30),
+    )
+    first[0]["close"] = 0.0
+    third = await provider.get_daily_bars("AAPL", days_back=30)
+
+    assert captured["history_calls"] == 1
+    assert second[0]["close"] == 100.0
+    assert third[0]["close"] == 100.0
 
 
 async def test_get_market_movers_converts_direction_and_shape(gateway_client) -> None:

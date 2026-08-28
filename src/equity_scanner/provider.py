@@ -21,6 +21,11 @@ from schwab_gateway_sdk.client import (
 log = logging.getLogger(__name__)
 
 
+def _gateway_symbol(symbol: str) -> str:
+    """Translate class-share notation to the form accepted by Schwab/Gateway."""
+    return symbol.replace(".", "/")
+
+
 class StaleGatewayDataError(RuntimeError):
     """Raised when the gateway explicitly marks a response stale."""
 
@@ -64,6 +69,9 @@ class GatewayEquityDataProvider:
         self._client = client
         self._max_attempts = max_attempts
         self._retry_backoff_seconds = retry_backoff_seconds
+        self._daily_bars_tasks: dict[
+            tuple[str, int | None], asyncio.Task[tuple[dict, ...]]
+        ] = {}
 
     async def _retry(self, operation):
         for attempt in range(1, self._max_attempts + 1):
@@ -83,12 +91,37 @@ class GatewayEquityDataProvider:
             )
 
     async def get_daily_bars(self, symbol: str, days_back: int | None = 20) -> list[dict]:
-        """Fetch the scanner's explicit twenty-day daily-history window."""
-        response = await self._retry(
-            lambda: self._client.get_history(symbol, frequency="daily", days_back=days_back)
-        )
-        self._require_fresh(response.history, f"history for {symbol}")
-        return [_bar_to_candle(bar) for bar in response.history.bars]
+        """Fetch and cache one daily-history window for this provider's lifetime.
+
+        A provider is created per scanner run, so this coalesces overlapping RVOL and
+        prior-day requests without carrying market data across runs. Failed tasks are
+        evicted so a later phase can retry normally.
+        """
+        key = (symbol, days_back)
+        task = self._daily_bars_tasks.get(key)
+        if task is None:
+
+            async def _load() -> tuple[dict, ...]:
+                response = await self._retry(
+                    lambda: self._client.get_history(
+                        symbol,
+                        frequency="daily",
+                        days_back=days_back,
+                    )
+                )
+                self._require_fresh(response.history, f"history for {symbol}")
+                return tuple(_bar_to_candle(bar) for bar in response.history.bars)
+
+            task = asyncio.create_task(_load())
+            self._daily_bars_tasks[key] = task
+
+        try:
+            bars = await task
+        except BaseException:
+            if self._daily_bars_tasks.get(key) is task:
+                self._daily_bars_tasks.pop(key, None)
+            raise
+        return [dict(bar) for bar in bars]
 
     async def get_equity_quotes(
         self,
@@ -102,12 +135,17 @@ class GatewayEquityDataProvider:
         gateway's /v1/quotes per-request cap, MAX_SYMBOLS in SchwabGateway's api.py)
         and dedupes, since ButterflyGuy's raw Schwab client allowed larger/duplicate
         batches that the gateway's contract does not accept."""
-        unique_symbols = list(dict.fromkeys(symbols))
-        if not unique_symbols:
+        requested_symbols = list(dict.fromkeys(symbols))
+        if not requested_symbols:
             return {}
+        gateway_to_requested: dict[str, str] = {}
+        for symbol in requested_symbols:
+            gateway_to_requested.setdefault(_gateway_symbol(symbol), symbol)
+        gateway_symbols = list(gateway_to_requested)
         batch_size = min(batch_size, 100)
         chunks = [
-            unique_symbols[i : i + batch_size] for i in range(0, len(unique_symbols), batch_size)
+            gateway_symbols[i : i + batch_size]
+            for i in range(0, len(gateway_symbols), batch_size)
         ]
         sem = asyncio.Semaphore(concurrency)
         quotes: dict[str, QuoteV1] = {}
@@ -115,16 +153,29 @@ class GatewayEquityDataProvider:
         async def _fetch(chunk: list[str]) -> None:
             async with sem:
                 response = await self._retry(lambda: self._client.get_quotes(chunk))
+                stale_symbols: list[str] = []
                 for quote in response.quotes:
+                    requested_symbol = gateway_to_requested.get(quote.symbol, quote.symbol)
                     if quote.stale:
-                        log.warning(
-                            "gateway_quote_rejected symbol=%s reason=stale age_seconds=%s",
-                            quote.symbol,
-                            quote.age_seconds,
-                        )
-                        continue
-                    quotes[quote.symbol] = quote
-                missing = sorted(set(chunk) - {quote.symbol for quote in response.quotes})
+                        # Quote freshness is based on the selected trade event. In
+                        # premarket, an otherwise usable quote can therefore be
+                        # marked stale simply because the symbol has not traded
+                        # recently. Preserve it for the scanner's normal field and
+                        # liquidity validation, while retaining the SDK's stale bit
+                        # and exposing it as a data-quality flag downstream.
+                        stale_symbols.append(requested_symbol)
+                    if requested_symbol != quote.symbol:
+                        quote = quote.model_copy(update={"symbol": requested_symbol})
+                    quotes[requested_symbol] = quote
+                if stale_symbols:
+                    log.info(
+                        "gateway_quote_batch_stale_retained count=%d",
+                        len(stale_symbols),
+                    )
+                returned = {quote.symbol for quote in response.quotes}
+                missing = sorted(
+                    gateway_to_requested[symbol] for symbol in set(chunk) - returned
+                )
                 if missing:
                     log.warning("gateway_quote_batch_partial missing_symbols=%s", ",".join(missing))
 

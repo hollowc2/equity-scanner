@@ -57,6 +57,28 @@ async def test_quotes_batch_at_exact_100_boundary() -> None:
     assert len(result) == 201
 
 
+async def test_class_share_symbols_are_translated_at_gateway_boundary() -> None:
+    requested = []
+
+    def handler(request):
+        symbols = request.url.params["symbols"].split(",")
+        requested.extend(symbols)
+        return httpx.Response(
+            200,
+            json={"schema_version": "1.0", "quotes": [quote(symbol) for symbol in symbols]},
+        )
+
+    http, provider = await _provider(handler)
+    try:
+        result = await provider.get_equity_quotes(["BF.B", "BRK.B"])
+    finally:
+        await http.aclose()
+
+    assert requested == ["BF/B", "BRK/B"]
+    assert set(result) == {"BF.B", "BRK.B"}
+    assert result["BRK.B"].symbol == "BRK.B"
+
+
 @pytest.mark.parametrize(
     "status,error", [(401, GatewayAuthenticationError), (429, GatewayCapacityError)]
 )
@@ -104,7 +126,7 @@ async def test_malformed_and_partial_quote_results_are_explicit(caplog) -> None:
         await http.aclose()
 
 
-async def test_stale_quote_is_rejected_and_stale_history_fails_closed() -> None:
+async def test_stale_quote_is_retained_and_stale_history_fails_closed() -> None:
     def handler(request):
         if request.url.path == "/v1/quotes":
             return httpx.Response(
@@ -117,11 +139,48 @@ async def test_stale_quote_is_rejected_and_stale_history_fails_closed() -> None:
             "age_seconds": 999.0, "data_quality_flags": []}})
     http, provider = await _provider(handler)
     try:
-        assert await provider.get_equity_quotes(["AAPL"]) == {}
+        quotes = await provider.get_equity_quotes(["AAPL"])
+        assert quotes["AAPL"].stale is True
         with pytest.raises(StaleGatewayDataError):
             await provider.get_daily_bars("AAPL", days_back=20)
     finally:
         await http.aclose()
+
+
+async def test_failed_history_task_is_evicted_before_a_later_retry() -> None:
+    calls = 0
+
+    def handler(_request):
+        nonlocal calls
+        calls += 1
+        stale = calls == 1
+        return httpx.Response(
+            200,
+            json={
+                "schema_version": "1.0",
+                "history": {
+                    "symbol": "AAPL",
+                    "frequency": "daily",
+                    "bars": [],
+                    "event_timestamp": NOW,
+                    "gateway_received_at": NOW,
+                    "source": "test",
+                    "stale": stale,
+                    "age_seconds": 999.0 if stale else 0.0,
+                    "data_quality_flags": [],
+                },
+            },
+        )
+
+    http, provider = await _provider(handler)
+    try:
+        with pytest.raises(StaleGatewayDataError):
+            await provider.get_daily_bars("AAPL")
+        assert await provider.get_daily_bars("AAPL") == []
+    finally:
+        await http.aclose()
+
+    assert calls == 2
 
 
 def test_no_direct_schwab_client_is_initialized() -> None:

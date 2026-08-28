@@ -18,6 +18,8 @@ is out of scope for this repo's code and is a separate, explicitly gated checkpo
   `get_history`/`get_movers`/`get_quotes` to the shapes ButterflyGuy's
   `volume.py`/`scanner.py`/`universes.py` expect (candle dicts, mover dicts, and a
   `symbol -> QuoteV1` map, batched at the gateway's 100-symbols-per-request cap).
+  Daily-history requests are coalesced and cached for one provider/run so the RVOL
+  and prior-day phases do not refetch the same symbol/window.
 - `volume.py` — ported `fetch_avg_volumes`/`fetch_prior_day_changes` and their pure
   helpers (`avg_daily_volume`, `prior_session_pct_change`, `compute_rvol`,
   `symbols_needing_rvol_fetch`).
@@ -36,7 +38,8 @@ is out of scope for this repo's code and is a separate, explicitly gated checkpo
   than reading ButterflyGuy's — see the module docstring for why.
 - `news.py` — ported `equity_scan/news.py`: SEC EDGAR full-text search +
   company-facts, and Alpha Vantage news/earnings, keyed by ticker. Zero
-  Schwab/gateway dependency.
+  Schwab/gateway dependency. Per-provider concurrency is bounded; SEC request starts
+  remain rate-spaced through `sec_request_interval_seconds`.
 - `report.py` — ported `equity_scan/report.py`: formats `ScanResults` into
   Discord-message-sized (2000-char) chunks, plus dated markdown/JSON archiving.
 - `notifier.py` — **narrow** port of `services/notifier.py`'s `DiscordNotifier`:
@@ -44,7 +47,9 @@ is out of scope for this repo's code and is a separate, explicitly gated checkpo
   butterfly-options-trade notifications and doesn't apply here.
 - `run.py` — CLI orchestration (`equity-scanner-run`), ported from
   `scripts/run_morning_scan.py`: universes -> quotes -> volume -> snapshots ->
-  ranking -> news -> report -> archive -> Discord.
+  ranking -> news -> report -> archive -> Discord. Every material phase logs elapsed
+  milliseconds, and generation timings are persisted in the JSON archive under
+  `phase_timings_ms`.
 - `refresh_universes.py` — CLI (`equity-scanner-refresh-universes`), ported from
   `scripts/refresh_equity_universes.py`: refreshes `sp500.txt`/`nq100.txt`/
   `sectors.json`/`liquid.txt`/`liquid_meta.json`.

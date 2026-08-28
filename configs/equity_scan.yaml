@@ -31,9 +31,12 @@ news:
   min_score_for_focus: 4.0
   request_timeout_seconds: 10.0
   sec_user_agent_env: SEC_USER_AGENT
+  sec_request_concurrency: 4
+  sec_request_interval_seconds: 0.1
   alpha_vantage_api_key_env: ALPHA_VANTAGE_API_KEY
   alpha_vantage_max_news_symbols: 20
   alpha_vantage_news_limit: 20
+  alpha_vantage_request_concurrency: 4
 
 batch_size: 100
 rvol_lookback_days: 20

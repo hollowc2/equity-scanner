@@ -14,6 +14,8 @@ import argparse
 import asyncio
 import logging
 import os
+import time
+from dataclasses import replace
 
 from equity_scanner.config import AppSettings
 from equity_scanner.gateway import build_gateway_client
@@ -44,6 +46,17 @@ from equity_scanner.volume import (
 )
 
 log = logging.getLogger("equity_scanner.run")
+
+
+def _record_phase(
+    timings: dict[str, float],
+    phase: str,
+    started_at: float,
+) -> float:
+    elapsed_ms = round((time.perf_counter() - started_at) * 1000.0, 3)
+    timings[phase] = elapsed_ms
+    log.info("equity_scan_phase phase=%s elapsed_ms=%.3f", phase, elapsed_ms)
+    return elapsed_ms
 
 
 def _news_candidate_symbols(snapshots: list[EquitySnapshot], *, limit: int) -> list[str]:
@@ -81,6 +94,9 @@ async def run_scan(
         log.info("equity_scan_skipped reason=not_trading_day date=%s", generated_at.date())
         return []
 
+    run_started = time.perf_counter()
+    phase_timings_ms: dict[str, float] = {}
+    phase_started = time.perf_counter()
     app_settings = AppSettings()
     scan_config = load_equity_scan_config(scan_config_path)
     if app_settings.sec_user_agent:
@@ -105,6 +121,7 @@ async def run_scan(
             "No symbols loaded. Refresh universes with `equity-scanner-refresh-universes` "
             "and add tickers to custom.txt."
         )
+    _record_phase(phase_timings_ms, "setup", phase_started)
 
     async with build_gateway_client(app_settings) as gateway:
         provider = GatewayEquityDataProvider(
@@ -117,8 +134,13 @@ async def run_scan(
             scan_config.universes,
             len(symbols),
         )
+        phase_started = time.perf_counter()
         quotes = await provider.get_equity_quotes(symbols, batch_size=scan_config.batch_size)
+        _record_phase(phase_timings_ms, "quotes", phase_started)
+
+        phase_started = time.perf_counter()
         context_quotes = await provider.get_equity_quotes(scan_config.context_symbols)
+        _record_phase(phase_timings_ms, "context_quotes", phase_started)
         sector_map = load_sector_map(scan_config.universe_dir)
         liquid_meta = load_liquid_meta(scan_config.universe_dir)
         reference_prices = {
@@ -130,6 +152,7 @@ async def run_scan(
         in_premarket = is_premarket_window(generated_at, start=scan_config.premarket_start_et)
 
         avg_volumes: dict[str, float] = {}
+        phase_started = time.perf_counter()
         if scan_config.filters.min_rvol > 0:
             rvol_symbols = symbols_needing_rvol_fetch(quotes, in_premarket=in_premarket)
             log.info(
@@ -146,7 +169,9 @@ async def run_scan(
             log.info("equity_scan_rvol_loaded symbols_with_avg_volume=%d", len(avg_volumes))
         else:
             log.info("equity_scan_rvol_skipped reason=min_rvol_disabled")
+        _record_phase(phase_timings_ms, "rvol_history", phase_started)
 
+        phase_started = time.perf_counter()
         rejected_symbols: dict[str, int] = {}
         bad_data: list[dict] = []
         snapshots = build_snapshots(
@@ -171,11 +196,18 @@ async def run_scan(
             generated_at=generated_at,
         )
         prior_day_symbols = _prior_day_change_symbols(preliminary_results)
+        _record_phase(phase_timings_ms, "preliminary_ranking", phase_started)
+
+        phase_started = time.perf_counter()
         prior_day_changes = await fetch_prior_day_changes(
             provider,
             prior_day_symbols,
             concurrency=scan_config.rvol_fetch_concurrency,
+            days_back=scan_config.rvol_lookback_days,
         )
+        _record_phase(phase_timings_ms, "prior_day_history", phase_started)
+
+        phase_started = time.perf_counter()
         if prior_day_changes:
             # Fresh dicts, not the pass-1 ones: this re-classifies every symbol from
             # scratch against the now-accurate prior_day_pct, so reusing the pass-1
@@ -196,14 +228,17 @@ async def run_scan(
                 rejected_symbols=rejected_symbols,
                 bad_data=bad_data,
             )
+        _record_phase(phase_timings_ms, "snapshot_finalize", phase_started)
         log.info("equity_scan_prior_day_changes_loaded symbols=%d", len(prior_day_changes))
 
         news_symbols = _news_candidate_symbols(snapshots, limit=scan_config.news.max_symbols)
+        phase_started = time.perf_counter()
         news_impacts = await fetch_news_impacts(
             news_symbols,
             settings=scan_config.news,
             generated_at=generated_at,
         )
+        _record_phase(phase_timings_ms, "news", phase_started)
         snapshots = attach_news_impacts(snapshots, news_impacts)
         log.info(
             "equity_scan_news_loaded candidates=%d matched=%d providers=%s",
@@ -220,6 +255,7 @@ async def run_scan(
 
         movers_up: list[dict] = []
         movers_down: list[dict] = []
+        phase_started = time.perf_counter()
         if scan_config.include_movers:
 
             async def _fetch_index_movers(index: str) -> tuple[list[dict], list[dict]]:
@@ -243,7 +279,9 @@ async def run_scan(
                 up, down = result
                 movers_up.extend(up)
                 movers_down.extend(down)
+        _record_phase(phase_timings_ms, "movers", phase_started)
 
+        phase_started = time.perf_counter()
         results = rank_scan_results(
             snapshots,
             settings=scan_config,
@@ -255,17 +293,32 @@ async def run_scan(
             rejected_symbols=rejected_symbols,
             bad_data=bad_data,
         )
+        _record_phase(phase_timings_ms, "final_ranking", phase_started)
+
+        phase_started = time.perf_counter()
         messages = build_report(results, settings=scan_config, generated_at=generated_at)
+        _record_phase(phase_timings_ms, "report", phase_started)
+
+        phase_started = time.perf_counter()
         archive_path = archive_report(
             messages,
             report_dir=scan_config.report_dir,
             generated_at=generated_at,
         )
+        _record_phase(phase_timings_ms, "markdown_archive", phase_started)
+        phase_timings_ms["total_generation"] = round(
+            (time.perf_counter() - run_started) * 1000.0,
+            3,
+        )
+        results = replace(results, phase_timings_ms=dict(phase_timings_ms))
+
+        phase_started = time.perf_counter()
         json_archive_path = archive_report_json(
             results,
             report_dir=scan_config.report_dir,
             generated_at=generated_at,
         )
+        _record_phase(phase_timings_ms, "json_archive", phase_started)
         log.info(
             "equity_scan_complete open_scan=%s prior_gainers=%d prior_losers=%d "
             "premarket_gainers=%d premarket_losers=%d opening_focus=%d matched_symbols=%d "
@@ -285,6 +338,7 @@ async def run_scan(
             archive_path,
             json_archive_path,
         )
+        log.info("equity_scan_timings phase_timings_ms=%s", phase_timings_ms)
 
         if dry_run:
             for message in messages:
