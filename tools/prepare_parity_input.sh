@@ -3,8 +3,11 @@ set -eu
 
 scanner_root=${EQUITY_SCANNER_ROOT:-/opt/equity-scanner}
 reference_root=${BUTTERFLYGUY_ROOT:-/opt/butterflyguy}
-run_date=$(TZ=America/New_York date +%F)
-[ "$run_date" = "${EQUITY_SCANNER_PARITY_DATE:?set approved parity date}" ] || exit 0
+run_date=${EQUITY_SCANNER_PARITY_DATE:?set approved parity date}
+[ "$(date -d "$run_date" +%F)" = "$run_date" ] || {
+  echo "parity_input_invalid_date"
+  exit 1
+}
 
 parity_root="$scanner_root/parity/$run_date"
 input_root="$parity_root/input"
