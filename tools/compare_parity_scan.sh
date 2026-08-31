@@ -20,3 +20,14 @@ docker run --rm --user "$(id -u):$(id -g)" \
   "$(sed -n '1p' "$scanner_root/.candidate-image")" \
   /parity/reference.json /parity/candidate.json \
   --output /parity/output/comparison.json
+
+python3 -c '
+import json
+import sys
+
+result = json.load(open(sys.argv[1], encoding="utf-8"))
+raise SystemExit(0 if result.get("verdict") == "pass" else 1)
+' "$parity_root/comparison.json" || {
+  echo "parity_verdict_difference"
+  exit 1
+}
