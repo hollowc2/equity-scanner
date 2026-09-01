@@ -150,3 +150,111 @@ def test_identity_evidence_records_and_verifies_frozen_hashes(tmp_path):
     assert evidence["input_manifest"]["verified_sha256"] == evidence["input_manifest"][
         "expected_sha256"
     ]
+
+
+def test_sequential_mode_fails_closed_on_incomplete_candidate_coverage():
+    evidence = {
+        "config_equal": True,
+        "universe_files_complete": True,
+        "universes_equal": True,
+        "input_manifest_verified": True,
+    }
+    candidate = report()
+    candidate["scanned_symbols"] = 1
+    candidate["quote_coverage"] = {
+        "complete": False,
+        "verdict": "incomplete",
+        "requested_count": 2,
+        "returned_count": 1,
+        "stale_retained_count": 1,
+        "unavailable_count": 1,
+        "failed_batch_count": 1,
+        "requested_symbols": ["WIN", "MISS"],
+        "returned_symbols": ["WIN"],
+        "stale_retained_symbols": ["WIN"],
+        "unavailable_symbols": ["MISS"],
+        "failed_batches": [{"batch_index": 1, "symbols": ["MISS"]}],
+    }
+
+    result = compare_reports(
+        report(),
+        candidate,
+        mode="sequential-skew-aware",
+        identity_evidence=evidence,
+    )
+
+    assert result["stable_gate_verdict"] == "difference"
+    assert result["stable_gate_failures"]["quote_coverage"]["reason"] == (
+        "incomplete_quote_coverage"
+    )
+
+
+def test_complete_candidate_coverage_does_not_change_strict_comparison():
+    candidate = report()
+    candidate["quote_coverage"] = {
+        "complete": True,
+        "verdict": "complete",
+        "requested_count": 2,
+        "returned_count": 2,
+        "stale_retained_count": 1,
+        "unavailable_count": 0,
+        "failed_batch_count": 0,
+        "requested_symbols": ["WIN", "OTHER"],
+        "returned_symbols": ["WIN", "OTHER"],
+        "stale_retained_symbols": ["WIN"],
+        "unavailable_symbols": [],
+        "failed_batches": [],
+    }
+
+    result = compare_reports(report(), candidate)
+
+    assert result["verdict"] == "pass"
+    assert result["coverage_failures"] == {}
+
+
+def test_strict_mode_fails_when_declared_coverage_is_incomplete():
+    candidate = report()
+    candidate["scanned_symbols"] = 1
+    candidate["quote_coverage"] = {
+        "complete": False,
+        "verdict": "incomplete",
+        "requested_count": 2,
+        "returned_count": 1,
+        "stale_retained_count": 0,
+        "unavailable_count": 1,
+        "failed_batch_count": 0,
+        "requested_symbols": ["WIN", "MISS"],
+        "returned_symbols": ["WIN"],
+        "stale_retained_symbols": [],
+        "unavailable_symbols": ["MISS"],
+        "failed_batches": [],
+    }
+
+    result = compare_reports(report(), candidate)
+
+    assert result["verdict"] == "difference"
+    assert result["coverage_failures"]["candidate"]["unavailable_symbols"] == ["MISS"]
+
+
+def test_comparator_rejects_internally_inconsistent_coverage():
+    candidate = report()
+    candidate["quote_coverage"] = {
+        "complete": True,
+        "verdict": "complete",
+        "requested_count": 2,
+        "returned_count": 2,
+        "stale_retained_count": 0,
+        "unavailable_count": 0,
+        "failed_batch_count": 0,
+        "requested_symbols": ["WIN", "OTHER"],
+        "returned_symbols": ["WIN"],
+        "stale_retained_symbols": [],
+        "unavailable_symbols": [],
+        "failed_batches": [],
+    }
+
+    result = compare_reports(report(), candidate)
+
+    assert result["coverage_failures"]["candidate"]["reason"] == (
+        "invalid_quote_coverage"
+    )

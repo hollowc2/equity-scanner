@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Literal
 
 from schwab_gateway_sdk import GatewayMarketDataClient, QuoteV1
 from schwab_gateway_sdk.client import (
@@ -28,6 +29,44 @@ def _gateway_symbol(symbol: str) -> str:
 
 class StaleGatewayDataError(RuntimeError):
     """Raised when the gateway explicitly marks a response stale."""
+
+
+QuoteCoverageMode = Literal["strict", "parity-bounded-recovery"]
+
+
+@dataclass(frozen=True)
+class QuoteBatchFailure:
+    batch_index: int
+    symbols: tuple[str, ...]
+    error_type: str
+    error_message: str
+    recovery_attempted: bool = False
+
+
+@dataclass(frozen=True)
+class QuoteCoverage:
+    mode: QuoteCoverageMode
+    requested_count: int
+    returned_count: int
+    stale_retained_count: int
+    unavailable_count: int
+    failed_batch_count: int
+    requested_symbols: tuple[str, ...]
+    returned_symbols: tuple[str, ...]
+    stale_retained_symbols: tuple[str, ...]
+    unavailable_symbols: tuple[str, ...]
+    failed_batches: tuple[QuoteBatchFailure, ...]
+    initial_call_count: int
+    recovery_call_count: int
+    max_concurrency: int
+    complete: bool
+    verdict: Literal["complete", "incomplete"]
+
+
+@dataclass(frozen=True)
+class QuoteCollection:
+    quotes: dict[str, QuoteV1]
+    coverage: QuoteCoverage
 
 
 def _bar_to_candle(bar: Any) -> dict[str, Any]:
@@ -135,52 +174,264 @@ class GatewayEquityDataProvider:
         gateway's /v1/quotes per-request cap, MAX_SYMBOLS in SchwabGateway's api.py)
         and dedupes, since ButterflyGuy's raw Schwab client allowed larger/duplicate
         batches that the gateway's contract does not accept."""
+        collection = await self.get_equity_quote_collection(
+            symbols,
+            batch_size=batch_size,
+            concurrency=concurrency,
+            mode="strict",
+        )
+        return collection.quotes
+
+    async def get_equity_quote_collection(
+        self,
+        symbols: list[str],
+        *,
+        batch_size: int = 100,
+        concurrency: int = 4,
+        mode: QuoteCoverageMode = "strict",
+        recovery_delay_seconds: float = 1.0,
+    ) -> QuoteCollection:
+        """Collect bounded quote batches and retain auditable coverage evidence.
+
+        ``strict`` preserves the normal fail-closed behavior, but only after every
+        scheduled batch has settled and its evidence has been retained.
+        ``parity-bounded-recovery`` makes at most one extra, sequential gateway call,
+        and only when exactly one initial batch has a transient gateway failure.
+        Incomplete parity collections are returned so the report and comparator can
+        fail with coverage evidence instead of losing all completed work.
+        """
+        if mode not in {"strict", "parity-bounded-recovery"}:
+            raise ValueError(f"unsupported quote coverage mode: {mode}")
+        if concurrency < 1:
+            raise ValueError("quote concurrency must be at least 1")
+        if recovery_delay_seconds < 0:
+            raise ValueError("quote recovery delay must not be negative")
+
         requested_symbols = list(dict.fromkeys(symbols))
         if not requested_symbols:
-            return {}
+            coverage = QuoteCoverage(
+                mode=mode,
+                requested_count=0,
+                returned_count=0,
+                stale_retained_count=0,
+                unavailable_count=0,
+                failed_batch_count=0,
+                requested_symbols=(),
+                returned_symbols=(),
+                stale_retained_symbols=(),
+                unavailable_symbols=(),
+                failed_batches=(),
+                initial_call_count=0,
+                recovery_call_count=0,
+                max_concurrency=concurrency,
+                complete=True,
+                verdict="complete",
+            )
+            return QuoteCollection(quotes={}, coverage=coverage)
         gateway_to_requested: dict[str, str] = {}
         for symbol in requested_symbols:
             gateway_to_requested.setdefault(_gateway_symbol(symbol), symbol)
         gateway_symbols = list(gateway_to_requested)
+        if batch_size < 1:
+            raise ValueError("quote batch size must be at least 1")
         batch_size = min(batch_size, 100)
         chunks = [
             gateway_symbols[i : i + batch_size]
             for i in range(0, len(gateway_symbols), batch_size)
         ]
         sem = asyncio.Semaphore(concurrency)
-        quotes: dict[str, QuoteV1] = {}
+        transient_errors = (GatewayCapacityError, GatewayTimeoutError, GatewayUnavailableError)
 
-        async def _fetch(chunk: list[str]) -> None:
+        @dataclass(frozen=True)
+        class _BatchResult:
+            batch_index: int
+            chunk: tuple[str, ...]
+            quotes: tuple[QuoteV1, ...]
+
+        async def _fetch(batch_index: int, chunk: list[str]) -> _BatchResult:
             async with sem:
                 response = await self._retry(lambda: self._client.get_quotes(chunk))
-                stale_symbols: list[str] = []
-                for quote in response.quotes:
-                    requested_symbol = gateway_to_requested.get(quote.symbol, quote.symbol)
-                    if quote.stale:
-                        # Quote freshness is based on the selected trade event. In
-                        # premarket, an otherwise usable quote can therefore be
-                        # marked stale simply because the symbol has not traded
-                        # recently. Preserve it for the scanner's normal field and
-                        # liquidity validation, while retaining the SDK's stale bit
-                        # and exposing it as a data-quality flag downstream.
-                        stale_symbols.append(requested_symbol)
-                    if requested_symbol != quote.symbol:
-                        quote = quote.model_copy(update={"symbol": requested_symbol})
-                    quotes[requested_symbol] = quote
-                if stale_symbols:
-                    log.info(
-                        "gateway_quote_batch_stale_retained count=%d",
-                        len(stale_symbols),
-                    )
-                returned = {quote.symbol for quote in response.quotes}
-                missing = sorted(
-                    gateway_to_requested[symbol] for symbol in set(chunk) - returned
-                )
-                if missing:
-                    log.warning("gateway_quote_batch_partial missing_symbols=%s", ",".join(missing))
+                return _BatchResult(batch_index, tuple(chunk), tuple(response.quotes))
 
-        await asyncio.gather(*(_fetch(chunk) for chunk in chunks))
-        return quotes
+        tasks = [
+            asyncio.create_task(_fetch(batch_index, chunk))
+            for batch_index, chunk in enumerate(chunks)
+        ]
+        try:
+            settled = await asyncio.gather(*tasks, return_exceptions=True)
+        except BaseException:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+
+        batch_results: dict[int, _BatchResult] = {}
+        initial_failures: dict[int, BaseException] = {}
+        for batch_index, result in enumerate(settled):
+            if isinstance(result, BaseException):
+                initial_failures[batch_index] = result
+            else:
+                batch_results[batch_index] = result
+
+        recovery_call_count = 0
+        recovery_attempted: set[int] = set()
+        transient_failures = [
+            batch_index
+            for batch_index, error in initial_failures.items()
+            if isinstance(error, transient_errors)
+        ]
+        if mode == "parity-bounded-recovery" and len(initial_failures) == 1 and len(
+            transient_failures
+        ) == 1:
+            batch_index = transient_failures[0]
+            recovery_attempted.add(batch_index)
+            recovery_call_count = 1
+            log.warning(
+                "gateway_quote_batch_recovery_scheduled batch_id=%d symbol_count=%d "
+                "delay_seconds=%.3f",
+                batch_index,
+                len(chunks[batch_index]),
+                recovery_delay_seconds,
+            )
+            if recovery_delay_seconds:
+                await asyncio.sleep(recovery_delay_seconds)
+            try:
+                # Deliberately bypass provider retries: this policy permits exactly
+                # one additional gateway call, independent of normal retry settings.
+                response = await self._client.get_quotes(chunks[batch_index])
+                batch_results[batch_index] = _BatchResult(
+                    batch_index,
+                    tuple(chunks[batch_index]),
+                    tuple(response.quotes),
+                )
+                initial_failures.pop(batch_index)
+                log.info(
+                    "gateway_quote_batch_recovery_succeeded batch_id=%d symbol_count=%d",
+                    batch_index,
+                    len(chunks[batch_index]),
+                )
+            except Exception as exc:
+                initial_failures[batch_index] = exc
+                log.warning(
+                    "gateway_quote_batch_recovery_failed batch_id=%d symbol_count=%d "
+                    "error_type=%s error=%s",
+                    batch_index,
+                    len(chunks[batch_index]),
+                    type(exc).__name__,
+                    exc,
+                )
+
+        quotes: dict[str, QuoteV1] = {}
+        stale_symbols: set[str] = set()
+        for batch_index in sorted(batch_results):
+            result = batch_results[batch_index]
+            returned_gateway_symbols: set[str] = set()
+            batch_stale_symbols: list[str] = []
+            for quote in result.quotes:
+                if quote.symbol not in result.chunk:
+                    log.warning(
+                        "gateway_quote_batch_unexpected_symbol batch_id=%d symbol=%s",
+                        batch_index,
+                        quote.symbol,
+                    )
+                    continue
+                returned_gateway_symbols.add(quote.symbol)
+                requested_symbol = gateway_to_requested.get(quote.symbol, quote.symbol)
+                if quote.stale:
+                    # Premarket quotes may be usable but stale merely because the
+                    # selected trade event is old. Preserve and label them.
+                    stale_symbols.add(requested_symbol)
+                    batch_stale_symbols.append(requested_symbol)
+                if requested_symbol != quote.symbol:
+                    quote = quote.model_copy(update={"symbol": requested_symbol})
+                quotes[requested_symbol] = quote
+            if batch_stale_symbols:
+                log.info(
+                    "gateway_quote_batch_stale_retained batch_id=%d count=%d",
+                    batch_index,
+                    len(batch_stale_symbols),
+                )
+            missing = sorted(
+                gateway_to_requested[symbol]
+                for symbol in set(result.chunk) - returned_gateway_symbols
+            )
+            if missing:
+                log.warning(
+                    "gateway_quote_batch_partial batch_id=%d missing_symbols=%s",
+                    batch_index,
+                    ",".join(missing),
+                )
+
+        failures = tuple(
+            QuoteBatchFailure(
+                batch_index=batch_index,
+                symbols=tuple(gateway_to_requested[symbol] for symbol in chunks[batch_index]),
+                error_type=type(error).__name__,
+                error_message=str(error),
+                recovery_attempted=batch_index in recovery_attempted,
+            )
+            for batch_index, error in sorted(initial_failures.items())
+        )
+        for failure in failures:
+            log.warning(
+                "gateway_quote_batch_failed batch_id=%d symbol_count=%d symbols=%s "
+                "error_type=%s error=%s recovery_attempted=%s",
+                failure.batch_index,
+                len(failure.symbols),
+                ",".join(failure.symbols),
+                failure.error_type,
+                failure.error_message,
+                failure.recovery_attempted,
+            )
+
+        returned_symbols = tuple(symbol for symbol in requested_symbols if symbol in quotes)
+        unavailable_symbols = tuple(symbol for symbol in requested_symbols if symbol not in quotes)
+        complete = not unavailable_symbols and not failures
+        coverage = QuoteCoverage(
+            mode=mode,
+            requested_count=len(requested_symbols),
+            returned_count=len(returned_symbols),
+            stale_retained_count=len(stale_symbols),
+            unavailable_count=len(unavailable_symbols),
+            failed_batch_count=len(failures),
+            requested_symbols=tuple(requested_symbols),
+            returned_symbols=returned_symbols,
+            stale_retained_symbols=tuple(
+                symbol for symbol in requested_symbols if symbol in stale_symbols
+            ),
+            unavailable_symbols=unavailable_symbols,
+            failed_batches=failures,
+            initial_call_count=len(chunks),
+            recovery_call_count=recovery_call_count,
+            max_concurrency=min(concurrency, len(chunks)),
+            complete=complete,
+            verdict="complete" if complete else "incomplete",
+        )
+        collection = QuoteCollection(quotes=quotes, coverage=coverage)
+        log.info(
+            "gateway_quote_coverage mode=%s verdict=%s requested=%d returned=%d "
+            "stale_retained=%d unavailable=%d failed_batches=%d initial_calls=%d "
+            "recovery_calls=%d max_concurrency=%d",
+            mode,
+            coverage.verdict,
+            coverage.requested_count,
+            coverage.returned_count,
+            coverage.stale_retained_count,
+            coverage.unavailable_count,
+            coverage.failed_batch_count,
+            coverage.initial_call_count,
+            coverage.recovery_call_count,
+            coverage.max_concurrency,
+        )
+
+        if mode == "strict" and failures:
+            first_error = initial_failures[failures[0].batch_index]
+            # Preserve the SDK exception type while making completed evidence
+            # available to strict-mode callers that choose to inspect it.
+            first_error.quote_collection = collection  # type: ignore[attr-defined]
+            raise first_error
+        return collection
 
     async def get_market_movers(
         self,

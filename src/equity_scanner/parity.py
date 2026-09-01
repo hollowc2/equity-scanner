@@ -98,6 +98,82 @@ def _capture_skew_seconds(reference: dict[str, Any], candidate: dict[str, Any]) 
         return None
 
 
+def _quote_coverage_failure(report: dict[str, Any]) -> dict[str, Any] | None:
+    """Return auditable gate evidence only when a report declares incomplete coverage.
+
+    Older/reference reports do not carry this field, so absence preserves existing
+    strict comparator behavior. Once coverage is declared, it must be internally
+    consistent and complete for either comparator mode to pass.
+    """
+    coverage = report.get("quote_coverage")
+    if coverage is None:
+        return None
+    if not isinstance(coverage, dict):
+        return {"reason": "invalid_quote_coverage"}
+    requested = coverage.get("requested_count")
+    returned = coverage.get("returned_count")
+    stale_retained = coverage.get("stale_retained_count")
+    unavailable = coverage.get("unavailable_count")
+    failed_batches = coverage.get("failed_batch_count")
+    complete = coverage.get("complete")
+    verdict = coverage.get("verdict")
+    requested_symbols = coverage.get("requested_symbols")
+    returned_symbols = coverage.get("returned_symbols")
+    stale_retained_symbols = coverage.get("stale_retained_symbols")
+    unavailable_symbols = coverage.get("unavailable_symbols")
+    failed_batch_evidence = coverage.get("failed_batches")
+    lists = (
+        requested_symbols,
+        returned_symbols,
+        stale_retained_symbols,
+        unavailable_symbols,
+        failed_batch_evidence,
+    )
+    counts = (requested, returned, stale_retained, unavailable, failed_batches)
+    internally_consistent = (
+        all(
+            isinstance(value, int) and not isinstance(value, bool) and value >= 0
+            for value in counts
+        )
+        and all(isinstance(value, list) for value in lists)
+        and len(requested_symbols) == requested
+        and len(returned_symbols) == returned
+        and len(stale_retained_symbols) == stale_retained
+        and len(unavailable_symbols) == unavailable
+        and len(failed_batch_evidence) == failed_batches
+        and len(set(requested_symbols)) == requested
+        and set(requested_symbols) == set(returned_symbols) | set(unavailable_symbols)
+        and not set(returned_symbols) & set(unavailable_symbols)
+        and set(stale_retained_symbols) <= set(returned_symbols)
+        and report.get("scanned_symbols") == returned
+    )
+    if not internally_consistent:
+        return {
+            "reason": "invalid_quote_coverage",
+            "requested_count": requested,
+            "returned_count": returned,
+            "scanned_symbols": report.get("scanned_symbols"),
+        }
+    if (
+        complete is True
+        and verdict == "complete"
+        and requested == returned
+        and unavailable == 0
+        and failed_batches == 0
+    ):
+        return None
+    return {
+        "reason": "incomplete_quote_coverage",
+        "requested_count": requested,
+        "returned_count": returned,
+        "stale_retained_count": stale_retained,
+        "unavailable_count": unavailable,
+        "failed_batch_count": failed_batches,
+        "unavailable_symbols": unavailable_symbols,
+        "failed_batches": failed_batch_evidence,
+    }
+
+
 def _canonical_config_hash(path: Path) -> str:
     config = yaml.safe_load(path.read_text()) or {}
     for key in ("universe_dir", "custom_watchlist", "report_dir"):
@@ -208,6 +284,8 @@ def compare_reports(
             stable_failures["universe_identity"] = "different_or_missing"
         if capture_skew is None:
             stable_failures["capture_timestamps"] = "missing_or_invalid"
+        if coverage_failure := _quote_coverage_failure(candidate):
+            stable_failures["quote_coverage"] = coverage_failure
 
         stable_section_differences = {}
         for section in ("prior_gainers", "prior_losers"):
@@ -352,7 +430,15 @@ def compare_reports(
                 "candidate": candidate.get(field),
             }
 
-    passed = not section_differences and not value_differences and not count_differences
+    coverage_failures = {}
+    if failure := _quote_coverage_failure(reference):
+        coverage_failures["reference"] = failure
+    if failure := _quote_coverage_failure(candidate):
+        coverage_failures["candidate"] = failure
+
+    passed = not (
+        section_differences or value_differences or count_differences or coverage_failures
+    )
     return {
         "verdict": "pass" if passed else "difference",
         "stable_gate_verdict": "pass" if passed else "difference",
@@ -363,6 +449,7 @@ def compare_reports(
         "capture_skew_seconds": capture_skew,
         "tolerance": tolerance,
         "count_differences": count_differences,
+        "coverage_failures": coverage_failures,
         "section_differences": section_differences,
         "calculated_value_differences": value_differences,
         "shared_ranked_symbols": len(shared),

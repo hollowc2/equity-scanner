@@ -15,13 +15,13 @@ import asyncio
 import logging
 import os
 import time
-from dataclasses import replace
+from dataclasses import asdict, replace
 
 from equity_scanner.config import AppSettings
 from equity_scanner.gateway import build_gateway_client
 from equity_scanner.news import fetch_news_impacts
 from equity_scanner.notifier import DiscordNotifier
-from equity_scanner.provider import GatewayEquityDataProvider
+from equity_scanner.provider import GatewayEquityDataProvider, QuoteCoverageMode
 from equity_scanner.report import archive_report, archive_report_json, build_report
 from equity_scanner.scan_config import load_equity_scan_config
 from equity_scanner.scanner import (
@@ -88,7 +88,10 @@ async def run_scan(
     scan_config_path: str = "configs/equity_scan.yaml",
     dry_run: bool = False,
     open_scan: bool = False,
+    quote_coverage_mode: QuoteCoverageMode = "strict",
 ) -> list[str]:
+    if quote_coverage_mode == "parity-bounded-recovery" and not dry_run:
+        raise ValueError("parity-bounded-recovery quote coverage requires --dry-run")
     generated_at = now_eastern()
     if not is_trading_day(generated_at.date()):
         log.info("equity_scan_skipped reason=not_trading_day date=%s", generated_at.date())
@@ -135,7 +138,14 @@ async def run_scan(
             len(symbols),
         )
         phase_started = time.perf_counter()
-        quotes = await provider.get_equity_quotes(symbols, batch_size=scan_config.batch_size)
+        quote_collection = await provider.get_equity_quote_collection(
+            symbols,
+            batch_size=scan_config.batch_size,
+            concurrency=4,
+            mode=quote_coverage_mode,
+        )
+        quotes = quote_collection.quotes
+        quote_coverage = asdict(quote_collection.coverage)
         _record_phase(phase_timings_ms, "quotes", phase_started)
 
         phase_started = time.perf_counter()
@@ -192,8 +202,9 @@ async def run_scan(
             movers_up=[],
             movers_down=[],
             market_context=[],
-            scanned_symbols=len(symbols),
+            scanned_symbols=len(quotes),
             generated_at=generated_at,
+            quote_coverage=quote_coverage,
         )
         prior_day_symbols = _prior_day_change_symbols(preliminary_results)
         _record_phase(phase_timings_ms, "preliminary_ranking", phase_started)
@@ -288,10 +299,11 @@ async def run_scan(
             movers_up=movers_up,
             movers_down=movers_down,
             market_context=market_context,
-            scanned_symbols=len(symbols),
+            scanned_symbols=len(quotes),
             generated_at=generated_at,
             rejected_symbols=rejected_symbols,
             bad_data=bad_data,
+            quote_coverage=quote_coverage,
         )
         _record_phase(phase_timings_ms, "final_ranking", phase_started)
 
@@ -372,6 +384,12 @@ def main() -> None:
         action="store_true",
         help="Include after-open Schwab mover buckets and Opening Focus context",
     )
+    parser.add_argument(
+        "--quote-coverage-mode",
+        choices=("strict", "parity-bounded-recovery"),
+        default="strict",
+        help="Quote-batch failure policy; bounded recovery is for auditable parity proofs",
+    )
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
 
@@ -387,6 +405,7 @@ def main() -> None:
             scan_config_path=args.scan_config,
             dry_run=args.dry_run,
             open_scan=args.open_scan,
+            quote_coverage_mode=args.quote_coverage_mode,
         )
     )
 

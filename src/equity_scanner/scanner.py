@@ -86,6 +86,7 @@ class ScanResults:
     rejected_symbols: dict[str, int] | None = None
     bad_data: list[dict[str, Any]] | None = None
     phase_timings_ms: dict[str, float] | None = None
+    quote_coverage: dict[str, Any] | None = None
 
 
 def _as_float(value: Any) -> float | None:
@@ -524,6 +525,7 @@ def rank_scan_results(
     generated_at: dt.datetime | None = None,
     rejected_symbols: dict[str, int] | None = None,
     bad_data: list[dict[str, Any]] | None = None,
+    quote_coverage: dict[str, Any] | None = None,
 ) -> ScanResults:
     limits = settings.limits
     filters = settings.filters
@@ -591,4 +593,5 @@ def rank_scan_results(
         show_movers=show_movers,
         rejected_symbols=rejected_symbols,
         bad_data=bad_data,
+        quote_coverage=quote_coverage,
     )

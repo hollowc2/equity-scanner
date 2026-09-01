@@ -20,6 +20,11 @@ is out of scope for this repo's code and is a separate, explicitly gated checkpo
   `symbol -> QuoteV1` map, batched at the gateway's 100-symbols-per-request cap).
   Daily-history requests are coalesced and cached for one provider/run so the RVOL
   and prior-day phases do not refetch the same symbol/window.
+  Quote batches normally remain fail-closed. The explicit
+  `parity-bounded-recovery` coverage mode settles every initial batch, retains
+  successful results, and makes one delayed sequential recovery call only when
+  exactly one batch has a transient gateway failure. It never retries multiple
+  failed batches.
 - `volume.py` — ported `fetch_avg_volumes`/`fetch_prior_day_changes` and their pure
   helpers (`avg_daily_volume`, `prior_session_pct_change`, `compute_rvol`,
   `symbols_needing_rvol_fetch`).
@@ -73,6 +78,15 @@ Both accept `--scan-config path/to/equity_scan.yaml`; unset fields fall back to
 `scan_config.py`'s defaults. See `.env.example` for the required/optional secrets.
 The checked-in config is `configs/equity_scan.yaml`; all external actions are disabled
 by using `--dry-run`.
+
+Parity runs additionally pass
+`--quote-coverage-mode parity-bounded-recovery`. Their JSON report records requested,
+returned, stale-retained, and unavailable symbols; failed batch IDs, symbols, and
+typed errors; initial/recovery call counts; and maximum quote concurrency. Coverage
+must be exactly 100% for either strict or `sequential-skew-aware` comparison to pass.
+If the one recovery call fails, or more than one initial batch fails, the scanner
+still writes the partial evidence with `scanned_symbols` equal to the number of
+returned universe symbols, and the comparator fails with `incomplete_quote_coverage`.
 
 ## Testing
 

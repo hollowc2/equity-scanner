@@ -5,10 +5,13 @@ shape instead of the old two-payload dict."""
 from __future__ import annotations
 
 import datetime as dt
+import json
+from dataclasses import asdict
 
 from schwab_gateway_sdk import QuoteV1
 
 from equity_scanner.news import NewsImpact
+from equity_scanner.provider import QuoteBatchFailure, QuoteCoverage
 from equity_scanner.report import (
     _format_market_context,
     archive_report,
@@ -86,6 +89,59 @@ def test_archive_report_json_writes_scan_internals(tmp_path):
     assert path.name == "2026-06-08.json"
     assert '"opening_focus"' in text
     assert '"reference_price_deviation": 1' in text
+
+
+def test_archive_report_json_serializes_incomplete_quote_coverage(tmp_path):
+    settings = EquityScanSettings()
+    generated_at = _premarket_et()
+    coverage = QuoteCoverage(
+        mode="parity-bounded-recovery",
+        requested_count=2,
+        returned_count=1,
+        stale_retained_count=1,
+        unavailable_count=1,
+        failed_batch_count=1,
+        requested_symbols=("AAPL", "MSFT"),
+        returned_symbols=("AAPL",),
+        stale_retained_symbols=("AAPL",),
+        unavailable_symbols=("MSFT",),
+        failed_batches=(
+            QuoteBatchFailure(
+                batch_index=1,
+                symbols=("MSFT",),
+                error_type="GatewayTimeoutError",
+                error_message="gateway quote upstream timed out",
+                recovery_attempted=True,
+            ),
+        ),
+        initial_call_count=2,
+        recovery_call_count=1,
+        max_concurrency=2,
+        complete=False,
+        verdict="incomplete",
+    )
+    results = rank_scan_results(
+        [],
+        settings=settings,
+        movers_up=[],
+        movers_down=[],
+        market_context=[],
+        scanned_symbols=1,
+        generated_at=generated_at,
+        quote_coverage=asdict(coverage),
+    )
+
+    path = archive_report_json(results, report_dir=str(tmp_path), generated_at=generated_at)
+    payload = json.loads(path.read_text())
+
+    assert payload["scanned_symbols"] == 1
+    assert payload["quote_coverage"]["requested_count"] == 2
+    assert payload["quote_coverage"]["returned_count"] == 1
+    assert payload["quote_coverage"]["stale_retained_symbols"] == ["AAPL"]
+    assert payload["quote_coverage"]["unavailable_symbols"] == ["MSFT"]
+    assert payload["quote_coverage"]["failed_batches"][0]["error_type"] == (
+        "GatewayTimeoutError"
+    )
 
 
 def test_build_report_omits_routine_filter_failures_and_quote_source_noise():
