@@ -254,6 +254,132 @@ async def test_parity_collection_multiple_failed_batches_are_not_retried() -> No
     ]
 
 
+async def test_paced_parity_recovers_three_failed_batches_sequentially() -> None:
+    attempts: dict[str, int] = {}
+    active = 0
+    peak_active = 0
+
+    async def handler(request):
+        nonlocal active, peak_active
+        symbols = request.url.params["symbols"].split(",")
+        batch = symbols[0]
+        attempts[batch] = attempts.get(batch, 0) + 1
+        active += 1
+        peak_active = max(peak_active, active)
+        await asyncio.sleep(0)
+        active -= 1
+        if batch in {"S0", "S100", "S200"} and attempts[batch] == 1:
+            return httpx.Response(504)
+        return httpx.Response(
+            200,
+            json={"schema_version": "1.0", "quotes": [quote(s) for s in symbols]},
+        )
+
+    http, provider = await _provider(handler, max_attempts=1)
+    try:
+        collection = await provider.get_equity_quote_collection(
+            [f"S{i}" for i in range(301)],
+            concurrency=4,
+            mode="parity-paced-recovery",
+            initial_batch_delay_seconds=0,
+            recovery_delay_seconds=0,
+        )
+    finally:
+        await http.aclose()
+
+    assert collection.coverage.verdict == "complete"
+    assert collection.coverage.initial_call_count == 4
+    assert collection.coverage.recovery_call_count == 3
+    assert collection.coverage.max_recovery_calls == 3
+    assert collection.coverage.max_concurrency == 1
+    assert sum(attempts.values()) == 7
+    assert peak_active == 1
+
+
+async def test_paced_parity_does_not_recover_more_than_three_failed_batches() -> None:
+    calls = 0
+
+    def handler(_request):
+        nonlocal calls
+        calls += 1
+        return httpx.Response(504)
+
+    http, provider = await _provider(handler, max_attempts=1)
+    try:
+        collection = await provider.get_equity_quote_collection(
+            [f"S{i}" for i in range(400)],
+            mode="parity-paced-recovery",
+            initial_batch_delay_seconds=0,
+            recovery_delay_seconds=0,
+        )
+    finally:
+        await http.aclose()
+
+    assert calls == 4
+    assert collection.coverage.failed_batch_count == 4
+    assert collection.coverage.recovery_call_count == 0
+    assert collection.coverage.unavailable_count == 400
+
+
+async def test_paced_parity_records_a_failed_recovery_and_continues() -> None:
+    attempts: dict[str, int] = {}
+
+    def handler(request):
+        symbols = request.url.params["symbols"].split(",")
+        batch = symbols[0]
+        attempts[batch] = attempts.get(batch, 0) + 1
+        if batch == "S0" or (batch == "S100" and attempts[batch] == 1):
+            return httpx.Response(504)
+        return httpx.Response(
+            200,
+            json={"schema_version": "1.0", "quotes": [quote(s) for s in symbols]},
+        )
+
+    http, provider = await _provider(handler, max_attempts=1)
+    try:
+        collection = await provider.get_equity_quote_collection(
+            [f"S{i}" for i in range(201)],
+            mode="parity-paced-recovery",
+            initial_batch_delay_seconds=0,
+            recovery_delay_seconds=0,
+        )
+    finally:
+        await http.aclose()
+
+    assert sum(attempts.values()) == 5
+    assert collection.coverage.recovery_call_count == 2
+    assert collection.coverage.failed_batch_count == 1
+    assert collection.coverage.unavailable_count == 100
+    assert collection.coverage.failed_batches[0].recovery_attempted is True
+
+
+async def test_paced_parity_cancellation_stops_during_recovery_delay() -> None:
+    calls = 0
+    initial_finished = asyncio.Event()
+
+    class TimedOutClient:
+        async def get_quotes(self, _symbols):
+            nonlocal calls
+            calls += 1
+            initial_finished.set()
+            raise GatewayTimeoutError("timed out")
+
+    provider = GatewayEquityDataProvider(TimedOutClient(), max_attempts=1)
+    task = asyncio.create_task(
+        provider.get_equity_quote_collection(
+            ["AAPL"],
+            mode="parity-paced-recovery",
+            recovery_delay_seconds=60,
+        )
+    )
+    await initial_finished.wait()
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert calls == 1
+
+
 async def test_parity_collection_all_batches_failed_is_auditable() -> None:
     calls = 0
 

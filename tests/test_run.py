@@ -34,9 +34,12 @@ async def test_run_scan_skips_market_holiday_before_gateway(monkeypatch):
     assert messages == []
 
 
-async def test_parity_quote_recovery_mode_requires_dry_run():
+@pytest.mark.parametrize(
+    "mode", ("parity-bounded-recovery", "parity-paced-recovery")
+)
+async def test_parity_quote_recovery_mode_requires_dry_run(mode):
     with pytest.raises(ValueError, match="requires --dry-run"):
-        await run.run_scan(quote_coverage_mode="parity-bounded-recovery")
+        await run.run_scan(quote_coverage_mode=mode)
 
 
 async def test_run_scan_persists_phase_timings_with_fake_boundaries(monkeypatch, tmp_path):
@@ -164,7 +167,9 @@ async def test_run_scan_persists_phase_timings_with_fake_boundaries(monkeypatch,
     assert all(value >= 0 for value in timings.values())
 
 
-async def test_mocked_twenty_batch_parity_run_survives_one_504(monkeypatch, tmp_path):
+async def test_mocked_twenty_batch_paced_parity_recovers_three_504s(
+    monkeypatch, tmp_path
+):
     generated_at = dt.datetime(2026, 9, 1, 8, 0, tzinfo=EASTERN)
     now_utc = generated_at.astimezone(dt.timezone.utc)
     attempts: dict[str, int] = {}
@@ -174,7 +179,7 @@ async def test_mocked_twenty_batch_parity_run_survives_one_504(monkeypatch, tmp_
         symbols = request.url.params["symbols"].split(",")
         batch = symbols[0]
         attempts[batch] = attempts.get(batch, 0) + 1
-        if batch == "S0900" and attempts[batch] == 1:
+        if batch in {"S0300", "S0900", "S1500"} and attempts[batch] == 1:
             return httpx.Response(504)
         return httpx.Response(
             200,
@@ -243,7 +248,7 @@ async def test_mocked_twenty_batch_parity_run_survives_one_504(monkeypatch, tmp_
         await run.run_scan(
             scan_config_path="unused.yaml",
             dry_run=True,
-            quote_coverage_mode="parity-bounded-recovery",
+            quote_coverage_mode="parity-paced-recovery",
         )
     finally:
         await http.aclose()
@@ -252,6 +257,9 @@ async def test_mocked_twenty_batch_parity_run_survives_one_504(monkeypatch, tmp_
     assert payload["scanned_symbols"] == 2000
     assert payload["quote_coverage"]["verdict"] == "complete"
     assert payload["quote_coverage"]["initial_call_count"] == 20
-    assert payload["quote_coverage"]["recovery_call_count"] == 1
-    assert payload["quote_coverage"]["max_concurrency"] == 4
-    assert sum(attempts.values()) == 21
+    assert payload["quote_coverage"]["recovery_call_count"] == 3
+    assert payload["quote_coverage"]["max_recovery_calls"] == 3
+    assert payload["quote_coverage"]["max_concurrency"] == 1
+    assert payload["quote_coverage"]["initial_batch_delay_seconds"] == 0.25
+    assert payload["quote_coverage"]["recovery_delay_seconds"] == 1.0
+    assert sum(attempts.values()) == 23

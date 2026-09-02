@@ -30,9 +30,10 @@ remaining_seconds=$((deadline_epoch - $(date +%s)))
   echo "parity_scan_deadline_elapsed"
   exit 1
 }
-# The named parity mode settles all 20 initial quote batches and permits at
-# most one delayed sequential recovery call. Incomplete coverage is archived
-# for the comparator to reject; normal scanner behavior remains strict.
+# The paced parity mode serializes all 20 initial quote batches and permits one
+# delayed sequential recovery call for each of at most three transient failures.
+# Incomplete coverage is archived for the comparator to reject; normal scanner
+# behavior remains strict.
 EQUITY_SCANNER_IMAGE="$image" \
 EQUITY_SCANNER_SECRET_ENV="$scanner_root/secrets/gateway.env" \
 EQUITY_SCANNER_UID=$(id -u) \
@@ -43,7 +44,7 @@ docker compose -f "$scanner_root/compose.candidate.yml" run --rm \
   -e SCHWAB_GATEWAY_MAX_ATTEMPTS=1 \
   -v "$input_root:/app/parity-input:ro" \
   -v "$parity_root/output:/app/parity-output:rw" \
-  scan --dry-run --quote-coverage-mode parity-bounded-recovery \
+  scan --dry-run --quote-coverage-mode parity-paced-recovery \
   --scan-config /app/parity-input/equity_scan.candidate.yaml \
   > "$parity_root/output/standalone.log" 2>&1
 

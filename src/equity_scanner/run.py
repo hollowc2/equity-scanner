@@ -90,8 +90,8 @@ async def run_scan(
     open_scan: bool = False,
     quote_coverage_mode: QuoteCoverageMode = "strict",
 ) -> list[str]:
-    if quote_coverage_mode == "parity-bounded-recovery" and not dry_run:
-        raise ValueError("parity-bounded-recovery quote coverage requires --dry-run")
+    if quote_coverage_mode != "strict" and not dry_run:
+        raise ValueError(f"{quote_coverage_mode} quote coverage requires --dry-run")
     generated_at = now_eastern()
     if not is_trading_day(generated_at.date()):
         log.info("equity_scan_skipped reason=not_trading_day date=%s", generated_at.date())
@@ -141,7 +141,7 @@ async def run_scan(
         quote_collection = await provider.get_equity_quote_collection(
             symbols,
             batch_size=scan_config.batch_size,
-            concurrency=4,
+            concurrency=1 if quote_coverage_mode == "parity-paced-recovery" else 4,
             mode=quote_coverage_mode,
         )
         quotes = quote_collection.quotes
@@ -386,9 +386,9 @@ def main() -> None:
     )
     parser.add_argument(
         "--quote-coverage-mode",
-        choices=("strict", "parity-bounded-recovery"),
+        choices=("strict", "parity-bounded-recovery", "parity-paced-recovery"),
         default="strict",
-        help="Quote-batch failure policy; bounded recovery is for auditable parity proofs",
+        help="Quote-batch failure policy; recovery modes are for auditable parity proofs",
     )
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()

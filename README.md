@@ -24,7 +24,10 @@ is out of scope for this repo's code and is a separate, explicitly gated checkpo
   `parity-bounded-recovery` coverage mode settles every initial batch, retains
   successful results, and makes one delayed sequential recovery call only when
   exactly one batch has a transient gateway failure. It never retries multiple
-  failed batches.
+  failed batches. The separately named `parity-paced-recovery` mode serializes
+  initial quote batches with a 250ms inter-batch delay, then makes one delayed,
+  sequential recovery call per transient failed batch when at most three batches
+  failed. This caps a 1,917-symbol universe at 20 initial plus three recovery calls.
 - `volume.py` — ported `fetch_avg_volumes`/`fetch_prior_day_changes` and their pure
   helpers (`avg_daily_volume`, `prior_session_pct_change`, `compute_rvol`,
   `symbols_needing_rvol_fetch`).
@@ -80,13 +83,14 @@ The checked-in config is `configs/equity_scan.yaml`; all external actions are di
 by using `--dry-run`.
 
 Parity runs additionally pass
-`--quote-coverage-mode parity-bounded-recovery`. Their JSON report records requested,
+`--quote-coverage-mode parity-paced-recovery`. Their JSON report records requested,
 returned, stale-retained, and unavailable symbols; failed batch IDs, symbols, and
-typed errors; initial/recovery call counts; and maximum quote concurrency. Coverage
-must be exactly 100% for either strict or `sequential-skew-aware` comparison to pass.
-If the one recovery call fails, or more than one initial batch fails, the scanner
-still writes the partial evidence with `scanned_symbols` equal to the number of
-returned universe symbols, and the comparator fails with `incomplete_quote_coverage`.
+typed errors; initial/recovery call counts and limits; pacing delays; and maximum
+quote concurrency. Coverage must be exactly 100% for either strict or
+`sequential-skew-aware` comparison to pass. If a recovery call fails, a non-transient
+batch fails, or more than three initial batches fail, the scanner still writes the
+partial evidence with `scanned_symbols` equal to the number of returned universe
+symbols, and the comparator fails with `incomplete_quote_coverage`.
 
 ## Testing
 
