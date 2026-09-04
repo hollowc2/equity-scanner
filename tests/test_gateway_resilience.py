@@ -353,6 +353,65 @@ async def test_paced_parity_records_a_failed_recovery_and_continues() -> None:
     assert collection.coverage.failed_batches[0].recovery_attempted is True
 
 
+async def test_paced_parity_keeps_retrying_a_batch_within_recovery_attempt_budget() -> None:
+    """An outage that outlasts a single recovery call should not sink the whole batch
+    when the caller can afford to wait: recovery keeps retrying the same batch, with
+    backoff, until it succeeds or the attempt budget is exhausted."""
+    attempts: dict[str, int] = {}
+
+    def handler(request):
+        symbols = request.url.params["symbols"].split(",")
+        batch = symbols[0]
+        attempts[batch] = attempts.get(batch, 0) + 1
+        if batch == "S0" and attempts[batch] < 3:
+            return httpx.Response(503)
+        return httpx.Response(
+            200,
+            json={"schema_version": "1.0", "quotes": [quote(s) for s in symbols]},
+        )
+
+    http, provider = await _provider(handler, max_attempts=1)
+    try:
+        collection = await provider.get_equity_quote_collection(
+            [f"S{i}" for i in range(100)],
+            mode="parity-paced-recovery",
+            initial_batch_delay_seconds=0,
+            recovery_delay_seconds=0,
+            max_recovery_attempts=4,
+        )
+    finally:
+        await http.aclose()
+
+    assert attempts["S0"] == 3
+    assert collection.coverage.verdict == "complete"
+    assert collection.coverage.recovery_call_count == 2
+    assert collection.coverage.max_recovery_attempts == 4
+    assert collection.coverage.failed_batch_count == 0
+    assert collection.coverage.unavailable_count == 0
+
+
+async def test_paced_parity_exhausts_recovery_attempt_budget_and_stays_unavailable() -> None:
+    def handler(_request):
+        return httpx.Response(503)
+
+    http, provider = await _provider(handler, max_attempts=1)
+    try:
+        collection = await provider.get_equity_quote_collection(
+            [f"S{i}" for i in range(100)],
+            mode="parity-paced-recovery",
+            initial_batch_delay_seconds=0,
+            recovery_delay_seconds=0,
+            max_recovery_attempts=3,
+        )
+    finally:
+        await http.aclose()
+
+    assert collection.coverage.recovery_call_count == 3
+    assert collection.coverage.failed_batch_count == 1
+    assert collection.coverage.unavailable_count == 100
+    assert collection.coverage.failed_batches[0].recovery_attempted is True
+
+
 async def test_paced_parity_cancellation_stops_during_recovery_delay() -> None:
     calls = 0
     initial_finished = asyncio.Event()

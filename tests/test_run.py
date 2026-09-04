@@ -82,7 +82,13 @@ async def test_run_scan_persists_phase_timings_with_fake_boundaries(monkeypatch,
             }
 
         async def get_equity_quote_collection(
-            self, symbols, *, batch_size=100, concurrency=4, mode="strict"
+            self,
+            symbols,
+            *,
+            batch_size=100,
+            concurrency=4,
+            mode="strict",
+            max_recovery_attempts=1,
         ):
             quotes = await self.get_equity_quotes(symbols, batch_size=batch_size)
             ordered = tuple(dict.fromkeys(symbols))

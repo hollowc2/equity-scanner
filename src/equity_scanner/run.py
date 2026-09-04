@@ -138,11 +138,17 @@ async def run_scan(
             len(symbols),
         )
         phase_started = time.perf_counter()
+        paced = quote_coverage_mode == "parity-paced-recovery"
         quote_collection = await provider.get_equity_quote_collection(
             symbols,
             batch_size=scan_config.batch_size,
-            concurrency=1 if quote_coverage_mode == "parity-paced-recovery" else 4,
+            concurrency=1 if paced else 4,
             mode=quote_coverage_mode,
+            # A gateway outage is usually transient; this app has no hard deadline
+            # of its own beyond finishing before the downstream alert send, so it
+            # is worth waiting out a few backed-off retries per failed batch
+            # rather than giving up after one.
+            max_recovery_attempts=4 if paced else 1,
         )
         quotes = quote_collection.quotes
         quote_coverage = asdict(quote_collection.coverage)

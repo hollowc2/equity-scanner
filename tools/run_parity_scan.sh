@@ -30,10 +30,10 @@ remaining_seconds=$((deadline_epoch - $(date +%s)))
   echo "parity_scan_deadline_elapsed"
   exit 1
 }
-# The paced parity mode serializes all 20 initial quote batches and permits one
-# delayed sequential recovery call for each of at most three transient failures.
-# Incomplete coverage is archived for the comparator to reject; normal scanner
-# behavior remains strict.
+# The paced parity mode serializes all 20 initial quote batches and permits up to
+# four backed-off sequential recovery calls for each of at most three transient
+# failures, bounded by the deadline below. Incomplete coverage is archived for the
+# comparator to reject; normal scanner behavior remains strict.
 EQUITY_SCANNER_IMAGE="$image" \
 EQUITY_SCANNER_SECRET_ENV="$scanner_root/secrets/gateway.env" \
 EQUITY_SCANNER_UID=$(id -u) \
