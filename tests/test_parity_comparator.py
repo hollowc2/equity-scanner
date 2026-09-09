@@ -1,5 +1,6 @@
 import hashlib
 
+import pytest
 import yaml
 
 from equity_scanner.parity import (
@@ -78,6 +79,154 @@ def test_sequential_mode_fails_on_stable_ranking_difference():
     )
     assert result["stable_gate_verdict"] == "difference"
     assert "prior_gainers" in result["stable_section_differences"]
+
+
+def test_sequential_mode_allows_capture_sensitive_prior_membership_changes():
+    evidence = {
+        "config_equal": True,
+        "universe_files_complete": True,
+        "universes_equal": True,
+        "input_manifest_verified": True,
+    }
+    reference = report(("INTC", "NOK", "TH", "SPCX"))
+    reference["prior_losers"] = [
+        {"symbol": "BIAF", "prior_day_pct": -41.519},
+        {"symbol": "CRCL", "prior_day_pct": -5.752},
+        {"symbol": "MSTR", "prior_day_pct": -4.398},
+        {"symbol": "HOOD", "prior_day_pct": -3.906},
+    ]
+    reference["scanned_symbols"] = 1897
+    reference["generated_at"] = "2026-09-09T09:00:04.905248-04:00"
+    candidate = report(("INTC", "NOK", "TH"))
+    candidate["prior_losers"] = [
+        {"symbol": "BIAF", "prior_day_pct": -41.519},
+        {"symbol": "MSTR", "prior_day_pct": -4.398},
+    ]
+    candidate["scanned_symbols"] = 1897
+    candidate["generated_at"] = "2026-09-09T09:10:05.233434-04:00"
+
+    result = compare_reports(
+        reference,
+        candidate,
+        mode="sequential-skew-aware",
+        identity_evidence=evidence,
+    )
+
+    assert result["stable_gate_verdict"] == "pass"
+    assert result["capture_skew_seconds"] == 600.328186
+    assert result["dynamic_capture_differences"]["section_differences"][
+        "prior_gainers"
+    ] == {
+        "reference": ["INTC", "NOK", "TH", "SPCX"],
+        "candidate": ["INTC", "NOK", "TH"],
+    }
+    assert result["dynamic_capture_differences"]["section_differences"][
+        "prior_losers"
+    ] == {
+        "reference": ["BIAF", "CRCL", "MSTR", "HOOD"],
+        "candidate": ["BIAF", "MSTR"],
+    }
+
+
+def test_sequential_mode_still_fails_on_shared_prior_ordering_difference():
+    evidence = {
+        "config_equal": True,
+        "universe_files_complete": True,
+        "universes_equal": True,
+        "input_manifest_verified": True,
+    }
+    reference = report(("WIN", "ALT", "CAPTURE_ONLY"))
+    candidate = report(("ALT", "WIN"))
+    candidate["generated_at"] = "2026-08-27T09:10:00-04:00"
+
+    result = compare_reports(
+        reference,
+        candidate,
+        mode="sequential-skew-aware",
+        identity_evidence=evidence,
+    )
+
+    assert result["stable_gate_verdict"] == "difference"
+    assert result["stable_section_differences"]["prior_gainers"] == {
+        "reference": ["WIN", "ALT"],
+        "candidate": ["ALT", "WIN"],
+    }
+
+
+def test_sequential_mode_still_fails_on_prior_section_assignment_difference():
+    evidence = {
+        "config_equal": True,
+        "universe_files_complete": True,
+        "universes_equal": True,
+        "input_manifest_verified": True,
+    }
+    candidate = report(())
+    candidate["prior_losers"] = report()["prior_gainers"]
+
+    result = compare_reports(
+        report(),
+        candidate,
+        mode="sequential-skew-aware",
+        identity_evidence=evidence,
+    )
+
+    assert result["stable_gate_verdict"] == "difference"
+    assert result["stable_section_assignment_differences"] == {
+        "WIN": {"reference": "prior_gainers", "candidate": "prior_losers"}
+    }
+
+
+def test_sequential_mode_still_fails_on_scanned_symbol_count_difference():
+    evidence = {
+        "config_equal": True,
+        "universe_files_complete": True,
+        "universes_equal": True,
+        "input_manifest_verified": True,
+    }
+    candidate = report()
+    candidate["scanned_symbols"] = 1
+
+    result = compare_reports(
+        report(),
+        candidate,
+        mode="sequential-skew-aware",
+        identity_evidence=evidence,
+    )
+
+    assert result["stable_gate_verdict"] == "difference"
+    assert result["stable_count_differences"] == {
+        "scanned_symbols": {"reference": 2, "candidate": 1}
+    }
+
+
+@pytest.mark.parametrize(
+    ("evidence_field", "failure_field"),
+    (
+        ("config_equal", "config_identity"),
+        ("input_manifest_verified", "input_manifest"),
+        ("universes_equal", "universe_identity"),
+    ),
+)
+def test_sequential_mode_still_fails_on_identity_difference(
+    evidence_field, failure_field
+):
+    evidence = {
+        "config_equal": True,
+        "universe_files_complete": True,
+        "universes_equal": True,
+        "input_manifest_verified": True,
+    }
+    evidence[evidence_field] = False
+
+    result = compare_reports(
+        report(),
+        report(),
+        mode="sequential-skew-aware",
+        identity_evidence=evidence,
+    )
+
+    assert result["stable_gate_verdict"] == "difference"
+    assert failure_field in result["stable_gate_failures"]
 
 
 def test_sequential_mode_applies_prior_day_absolute_tolerance():

@@ -92,6 +92,14 @@ batch fails, or more than three initial batches fail, the scanner still writes t
 partial evidence with `scanned_symbols` equal to the number of returned universe
 symbols, and the comparator fails with `incomplete_quote_coverage`.
 
+The skew-aware gate treats membership in all four ranked sections as capture-time
+evidence because every section is built only after current price, volume, reference-
+price, and premarket-RVOL filters run. For the nominally prior-day sections, it still
+gates the prior-day values, gain-versus-loss section assignment, and relative ordering
+of symbols present in both captures. Exact prior-section membership remains gated in
+strict mode. Stale-retained quote counts and symbols remain visible in coverage
+evidence and do not relax the requirement for complete quote coverage.
+
 ## Testing
 
 Tests run against fakes (`httpx.MockTransport` for the gateway HTTP layer,

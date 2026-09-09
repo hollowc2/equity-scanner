@@ -286,5 +286,62 @@ def test_stale_quote_is_visible_as_data_quality_flag() -> None:
     assert snapshots[0].data_quality_flags == ("gateway_stale",)
 
 
+def test_prior_day_ranking_membership_depends_on_current_quote_volume() -> None:
+    """A stable prior-day move is still gated by capture-time quote filters."""
+    settings = EquityScanSettings(
+        filters={
+            "min_volume": 500_000,
+            "min_rvol": 0.0,
+            "prior_day_min_pct": 3.0,
+            "max_price_disagreement_pct": None,
+        }
+    )
+    reference_quote = _quote(
+        session="regular",
+        close=96.18,
+        last=98.19,
+        net_percent_change=-5.752,
+        volume=603_679,
+    )
+    later_quote = reference_quote.model_copy(
+        update={"session": "extended", "volume": 499_999}
+    )
+
+    reference_snapshots = build_snapshots(
+        {"CRCL": reference_quote},
+        {"CRCL": {"liquid"}},
+        settings,
+        generated_at=PREMARKET_AT,
+    )
+    later_snapshots = build_snapshots(
+        {"CRCL": later_quote},
+        {"CRCL": {"liquid"}},
+        settings,
+        generated_at=PREMARKET_AT + dt.timedelta(minutes=10),
+    )
+
+    reference_results = rank_scan_results(
+        reference_snapshots,
+        settings=settings,
+        movers_up=[],
+        movers_down=[],
+        market_context=[],
+        scanned_symbols=1,
+        generated_at=PREMARKET_AT,
+    )
+    later_results = rank_scan_results(
+        later_snapshots,
+        settings=settings,
+        movers_up=[],
+        movers_down=[],
+        market_context=[],
+        scanned_symbols=1,
+        generated_at=PREMARKET_AT + dt.timedelta(minutes=10),
+    )
+
+    assert [snapshot.symbol for snapshot in reference_results.prior_losers] == ["CRCL"]
+    assert later_results.prior_losers == []
+
+
 def _candle(volume: int) -> dict:
     return {"datetime": 0, "close": 100.0, "volume": volume}

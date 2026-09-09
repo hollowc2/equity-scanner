@@ -80,6 +80,19 @@ def _snapshots_for_sections(
     return snapshots
 
 
+def _shared_order(
+    left: list[str | None], right: list[str | None]
+) -> tuple[list[str], list[str]]:
+    """Return each ranking restricted to symbols present in both captures."""
+    shared = {symbol for symbol in left if symbol is not None} & {
+        symbol for symbol in right if symbol is not None
+    }
+    return (
+        [symbol for symbol in left if symbol in shared],
+        [symbol for symbol in right if symbol in shared],
+    )
+
+
 def _same_number(left: Any, right: Any, tolerance: float) -> bool:
     if left is None or right is None:
         return left is right
@@ -288,14 +301,48 @@ def compare_reports(
             stable_failures["quote_coverage"] = coverage_failure
 
         stable_section_differences = {}
+        dynamic_section_differences = {}
+        # Prior-day values are stable, but membership is not: run_scan builds both
+        # prior sections from snapshots that already passed capture-time price,
+        # volume, reference-price, and premarket-RVOL filters. Compare the relative
+        # order of shared members while retaining exact membership as skew evidence.
         for section in ("prior_gainers", "prior_losers"):
             reference_symbols = [_symbol(item) for item in reference.get(section, [])]
             candidate_symbols = [_symbol(item) for item in candidate.get(section, [])]
             if reference_symbols != candidate_symbols:
-                stable_section_differences[section] = {
+                dynamic_section_differences[section] = {
                     "reference": reference_symbols,
                     "candidate": candidate_symbols,
                 }
+            reference_shared, candidate_shared = _shared_order(
+                reference_symbols, candidate_symbols
+            )
+            if reference_shared != candidate_shared:
+                stable_section_differences[section] = {
+                    "reference": reference_shared,
+                    "candidate": candidate_shared,
+                }
+
+        reference_prior_sections = {
+            symbol: section
+            for section in ("prior_gainers", "prior_losers")
+            for item in reference.get(section, [])
+            if (symbol := _symbol(item)) is not None
+        }
+        candidate_prior_sections = {
+            symbol: section
+            for section in ("prior_gainers", "prior_losers")
+            for item in candidate.get(section, [])
+            if (symbol := _symbol(item)) is not None
+        }
+        stable_section_assignment_differences = {
+            symbol: {
+                "reference": reference_prior_sections[symbol],
+                "candidate": candidate_prior_sections[symbol],
+            }
+            for symbol in sorted(reference_prior_sections.keys() & candidate_prior_sections)
+            if reference_prior_sections[symbol] != candidate_prior_sections[symbol]
+        }
 
         stable_count_differences = {}
         if reference.get("scanned_symbols") != candidate.get("scanned_symbols"):
@@ -325,7 +372,6 @@ def compare_reports(
                     }
                 )
 
-        dynamic_section_differences = {}
         for section in ("premarket_gainers", "premarket_losers"):
             reference_symbols = [_symbol(item) for item in reference.get(section, [])]
             candidate_symbols = [_symbol(item) for item in candidate.get(section, [])]
@@ -364,6 +410,7 @@ def compare_reports(
         passed = not (
             stable_failures
             or stable_section_differences
+            or stable_section_assignment_differences
             or stable_count_differences
             or stable_value_differences
         )
@@ -380,6 +427,9 @@ def compare_reports(
             "stable_gate_failures": stable_failures,
             "stable_count_differences": stable_count_differences,
             "stable_section_differences": stable_section_differences,
+            "stable_section_assignment_differences": (
+                stable_section_assignment_differences
+            ),
             "stable_calculated_value_differences": stable_value_differences,
             "shared_stable_ranked_symbols": len(shared_stable),
             "dynamic_capture_differences": {
@@ -390,6 +440,8 @@ def compare_reports(
             "excluded_from_stable_gate": [
                 "premarket_gainers",
                 "premarket_losers",
+                "prior_gainers membership",
+                "prior_losers membership",
                 "matched_symbols",
                 "rejected_symbols",
                 *DYNAMIC_FIELDS,
