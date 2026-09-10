@@ -120,4 +120,6 @@ extraction boundary and documented behavior differences.
 
 `compose.candidate.yml` is a dry-run-only, one-shot candidate definition. It requires
 an immutable `EQUITY_SCANNER_IMAGE` and an external scanner-owned secret env file.
+The scheduled wrapper targets the production read-only gateway at `127.0.0.1:8011`
+by default; `EQUITY_SCANNER_GATEWAY_URL` can override that non-secret endpoint.
 `infra/equity_scanner_candidate.cron` remains uninstalled until same-session parity.
