@@ -118,7 +118,7 @@ async def fetch_avg_volumes(
     async def _fetch_one(symbol: str) -> None:
         async with sem:
             try:
-                candles = await provider.get_daily_bars(symbol)
+                candles = await provider.get_daily_bars(symbol, days_back=lookback_days)
                 avg = avg_daily_volume(candles, lookback=lookback_days)
                 if avg is not None:
                     results[symbol] = avg
@@ -134,6 +134,7 @@ async def fetch_prior_day_changes(
     symbols: list[str],
     *,
     concurrency: int = 10,
+    days_back: int | None = 20,
 ) -> dict[str, float]:
     """Fetch true prior-session close-to-close percent changes."""
     if not symbols:
@@ -145,7 +146,7 @@ async def fetch_prior_day_changes(
     async def _fetch_one(symbol: str) -> None:
         async with sem:
             try:
-                candles = await provider.get_daily_bars(symbol)
+                candles = await provider.get_daily_bars(symbol, days_back=days_back)
                 pct = prior_session_pct_change(candles)
                 if pct is not None:
                     results[symbol] = pct

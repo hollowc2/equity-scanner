@@ -111,7 +111,11 @@ async def run_refresh(
 
     app_settings = AppSettings()
     async with build_gateway_client(app_settings) as gateway:
-        provider = GatewayEquityDataProvider(gateway)
+        provider = GatewayEquityDataProvider(
+            gateway,
+            max_attempts=app_settings.gateway_max_attempts,
+            retry_backoff_seconds=app_settings.gateway_retry_backoff_seconds,
+        )
         liquid_counts = await refresh_liquid_universe(
             universe_dir=scan_config.universe_dir,
             provider=provider,

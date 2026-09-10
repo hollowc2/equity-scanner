@@ -1,0 +1,20 @@
+name: equity_scanner_candidate
+
+services:
+  scan:
+    image: "${EQUITY_SCANNER_IMAGE:?set immutable image ID or repository digest}"
+    pull_policy: never
+    env_file:
+      - "${EQUITY_SCANNER_SECRET_ENV:?set scanner-owned secret env path}"
+    user: "${EQUITY_SCANNER_UID:-1000}:${EQUITY_SCANNER_GID:-1000}"
+    command: ["--dry-run", "--scan-config", "/app/configs/equity_scan.yaml"]
+    volumes:
+      - "./configs:/app/configs:ro"
+      - "./data:/app/data:ro"
+      - "./reports:/app/reports:rw"
+    network_mode: host
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    restart: "no"

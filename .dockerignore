@@ -1,0 +1,11 @@
+.git
+.agents
+.codex
+.venv
+.pytest_cache
+.ruff_cache
+reports
+data
+tests
+.env*
+__pycache__

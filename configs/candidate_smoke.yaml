@@ -1,0 +1,12 @@
+universes: [custom]
+universe_dir: configs/universes
+custom_watchlist: configs/universes/candidate_smoke.txt
+filters:
+  min_price: 5.0
+  min_volume: 0
+  min_rvol: 0.0
+news:
+  enabled: false
+batch_size: 100
+report_dir: reports/equity_scans
+context_symbols: [SPY, QQQ]

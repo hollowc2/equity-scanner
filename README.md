@@ -4,14 +4,10 @@ Migrating ButterflyGuy's embedded equity scanner
 (`Butterflyguy/src/butterfly_guy/equity_scan/`) off a direct `SchwabClientWrapper`
 onto [SchwabGateway](https://github.com/hollowc2/SchwabGateway)'s read-only HTTP API.
 
-**Phase 1** built a gateway-backed data provider, ported volume/rvol helpers, and
-provider-agnostic scan-ranking logic, proven against fakes — no universes, no news,
-no Discord, no orchestration CLI, no Helios deployment.
-
-**Phase 2** (this) takes it to a runnable morning scan: universe fetching (S&P 500,
+This standalone extraction provides a runnable morning scan: universe fetching (S&P 500,
 Nasdaq-100, a liquidity-filtered universe, and a custom watchlist), news enrichment
 (SEC EDGAR + Alpha Vantage), Discord reporting, and a CLI that wires it all together
-end to end — still gateway-backed, still not touching ButterflyGuy. Helios deployment
+end to end. It is gateway-backed and has no runtime dependency on ButterflyGuy. Helios deployment
 is out of scope for this repo's code and is a separate, explicitly gated checkpoint
 (see Deployment below) — not something either phase does automatically.
 
@@ -22,6 +18,16 @@ is out of scope for this repo's code and is a separate, explicitly gated checkpo
   `get_history`/`get_movers`/`get_quotes` to the shapes ButterflyGuy's
   `volume.py`/`scanner.py`/`universes.py` expect (candle dicts, mover dicts, and a
   `symbol -> QuoteV1` map, batched at the gateway's 100-symbols-per-request cap).
+  Daily-history requests are coalesced and cached for one provider/run so the RVOL
+  and prior-day phases do not refetch the same symbol/window.
+  Quote batches normally remain fail-closed. The explicit
+  `parity-bounded-recovery` coverage mode settles every initial batch, retains
+  successful results, and makes one delayed sequential recovery call only when
+  exactly one batch has a transient gateway failure. It never retries multiple
+  failed batches. The separately named `parity-paced-recovery` mode serializes
+  initial quote batches with a 250ms inter-batch delay, then makes one delayed,
+  sequential recovery call per transient failed batch when at most three batches
+  failed. This caps a 1,917-symbol universe at 20 initial plus three recovery calls.
 - `volume.py` — ported `fetch_avg_volumes`/`fetch_prior_day_changes` and their pure
   helpers (`avg_daily_volume`, `prior_session_pct_change`, `compute_rvol`,
   `symbols_needing_rvol_fetch`).
@@ -40,7 +46,8 @@ is out of scope for this repo's code and is a separate, explicitly gated checkpo
   than reading ButterflyGuy's — see the module docstring for why.
 - `news.py` — ported `equity_scan/news.py`: SEC EDGAR full-text search +
   company-facts, and Alpha Vantage news/earnings, keyed by ticker. Zero
-  Schwab/gateway dependency.
+  Schwab/gateway dependency. Per-provider concurrency is bounded; SEC request starts
+  remain rate-spaced through `sec_request_interval_seconds`.
 - `report.py` — ported `equity_scan/report.py`: formats `ScanResults` into
   Discord-message-sized (2000-char) chunks, plus dated markdown/JSON archiving.
 - `notifier.py` — **narrow** port of `services/notifier.py`'s `DiscordNotifier`:
@@ -48,7 +55,9 @@ is out of scope for this repo's code and is a separate, explicitly gated checkpo
   butterfly-options-trade notifications and doesn't apply here.
 - `run.py` — CLI orchestration (`equity-scanner-run`), ported from
   `scripts/run_morning_scan.py`: universes -> quotes -> volume -> snapshots ->
-  ranking -> news -> report -> archive -> Discord.
+  ranking -> news -> report -> archive -> Discord. Every material phase logs elapsed
+  milliseconds, and generation timings are persisted in the JSON archive under
+  `phase_timings_ms`.
 - `refresh_universes.py` — CLI (`equity-scanner-refresh-universes`), ported from
   `scripts/refresh_equity_universes.py`: refreshes `sp500.txt`/`nq100.txt`/
   `sectors.json`/`liquid.txt`/`liquid_meta.json`.
@@ -70,6 +79,26 @@ uv run equity-scanner-run --open-scan     # include after-open Schwab mover buck
 
 Both accept `--scan-config path/to/equity_scan.yaml`; unset fields fall back to
 `scan_config.py`'s defaults. See `.env.example` for the required/optional secrets.
+The checked-in config is `configs/equity_scan.yaml`; all external actions are disabled
+by using `--dry-run`.
+
+Parity runs additionally pass
+`--quote-coverage-mode parity-paced-recovery`. Their JSON report records requested,
+returned, stale-retained, and unavailable symbols; failed batch IDs, symbols, and
+typed errors; initial/recovery call counts and limits; pacing delays; and maximum
+quote concurrency. Coverage must be exactly 100% for either strict or
+`sequential-skew-aware` comparison to pass. If a recovery call fails, a non-transient
+batch fails, or more than three initial batches fail, the scanner still writes the
+partial evidence with `scanned_symbols` equal to the number of returned universe
+symbols, and the comparator fails with `incomplete_quote_coverage`.
+
+The skew-aware gate treats membership in all four ranked sections as capture-time
+evidence because every section is built only after current price, volume, reference-
+price, and premarket-RVOL filters run. For the nominally prior-day sections, it still
+gates the prior-day values, gain-versus-loss section assignment, and relative ordering
+of symbols present in both captures. Exact prior-section membership remains gated in
+strict mode. Stale-retained quote counts and symbols remain visible in coverage
+evidence and do not relax the requirement for complete quote coverage.
 
 ## Testing
 
@@ -80,13 +109,15 @@ Schwab credentials, no running gateway, no live network calls.
 
 ```
 uv run pytest
+uv run ruff check .
 ```
 
 ## Deployment
 
-Not part of this repo's code changes. SchwabGateway needs to actually be deployed
-with the quotes/history/movers routes live (check current Helios status before
-assuming), and equity-scanner needs its own deploy story (container/cron/scheduler —
-AfterHoursLab's `compose.yml`/`Dockerfile` is the closest existing pattern). Treat
-"ready to deploy" and "actually deployed" as separate checkpoints — get sign-off
-before either gateway release-tagging or standing up equity-scanner's own deployment.
+Deployment and schedule migration require separate approval. The current candidate
+gateway is never modified by this project. See `docs/dependency-map.md` for the
+extraction boundary and documented behavior differences.
+
+`compose.candidate.yml` is a dry-run-only, one-shot candidate definition. It requires
+an immutable `EQUITY_SCANNER_IMAGE` and an external scanner-owned secret env file.
+`infra/equity_scanner_candidate.cron` remains uninstalled until same-session parity.

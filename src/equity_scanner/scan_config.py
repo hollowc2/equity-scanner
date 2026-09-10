@@ -49,6 +49,8 @@ class EquityNewsSettings(BaseModel):
     request_timeout_seconds: float = 10.0
     sec_user_agent: str = "equity-scanner/0.1 (set SEC_USER_AGENT)"
     sec_user_agent_env: str = "SEC_USER_AGENT"
+    sec_request_concurrency: int = Field(default=4, ge=1, le=10)
+    sec_request_interval_seconds: float = Field(default=0.1, ge=0.0, le=1.0)
     sec_forms: list[str] = Field(
         default_factory=lambda: [
             "8-K",
@@ -65,6 +67,7 @@ class EquityNewsSettings(BaseModel):
     alpha_vantage_api_key_env: str = "ALPHA_VANTAGE_API_KEY"
     alpha_vantage_max_news_symbols: int = 20
     alpha_vantage_news_limit: int = 20
+    alpha_vantage_request_concurrency: int = Field(default=4, ge=1, le=10)
 
 
 class EquityScanSettings(BaseModel):

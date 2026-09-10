@@ -85,6 +85,8 @@ class ScanResults:
     show_movers: bool = True
     rejected_symbols: dict[str, int] | None = None
     bad_data: list[dict[str, Any]] | None = None
+    phase_timings_ms: dict[str, float] | None = None
+    quote_coverage: dict[str, Any] | None = None
 
 
 def _as_float(value: Any) -> float | None:
@@ -186,6 +188,8 @@ def parse_equity_quote(
 
     session_gap_pct = (price - prior_close) / prior_close * 100.0
     flags: list[str] = list(quote.data_quality_flags)
+    if quote.stale and "gateway_stale" not in flags:
+        flags.append("gateway_stale")
     if (
         quote.session == "regular"
         and quote.net_percent_change is not None
@@ -521,6 +525,7 @@ def rank_scan_results(
     generated_at: dt.datetime | None = None,
     rejected_symbols: dict[str, int] | None = None,
     bad_data: list[dict[str, Any]] | None = None,
+    quote_coverage: dict[str, Any] | None = None,
 ) -> ScanResults:
     limits = settings.limits
     filters = settings.filters
@@ -588,4 +593,5 @@ def rank_scan_results(
         show_movers=show_movers,
         rejected_symbols=rejected_symbols,
         bad_data=bad_data,
+        quote_coverage=quote_coverage,
     )

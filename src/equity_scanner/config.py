@@ -5,6 +5,8 @@ at the point a live post/fetch is actually attempted — see run.py)."""
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -16,6 +18,21 @@ class AppSettings(BaseSettings):
 
     gateway_url: str = Field(validation_alias="SCHWAB_GATEWAY_URL")
     gateway_api_key: SecretStr = Field(validation_alias="SCHWAB_GATEWAY_API_KEY")
+    gateway_client_identity: Literal["equity-scanner"] = Field(
+        default="equity-scanner", validation_alias="SCHWAB_GATEWAY_CLIENT_IDENTITY"
+    )
+    gateway_priority: Literal["background"] = Field(
+        default="background", validation_alias="SCHWAB_GATEWAY_PRIORITY"
+    )
+    gateway_timeout_seconds: float = Field(
+        default=5.0, gt=0, validation_alias="SCHWAB_GATEWAY_TIMEOUT_SECONDS"
+    )
+    gateway_max_attempts: int = Field(
+        default=3, ge=1, le=6, validation_alias="SCHWAB_GATEWAY_MAX_ATTEMPTS"
+    )
+    gateway_retry_backoff_seconds: float = Field(
+        default=0.25, ge=0, le=10, validation_alias="SCHWAB_GATEWAY_RETRY_BACKOFF_SECONDS"
+    )
     sec_user_agent: str | None = Field(default=None, validation_alias="SEC_USER_AGENT")
     alpha_vantage_api_key: SecretStr | None = Field(
         default=None, validation_alias="ALPHA_VANTAGE_API_KEY"

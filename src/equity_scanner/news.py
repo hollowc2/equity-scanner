@@ -27,6 +27,25 @@ ALPHA_VANTAGE_URL = "https://www.alphavantage.co/query"
 log = logging.getLogger(__name__)
 
 
+class _RequestStartLimiter:
+    """Space request starts while still allowing slow responses to overlap."""
+
+    def __init__(self, interval_seconds: float) -> None:
+        self._interval_seconds = interval_seconds
+        self._lock = asyncio.Lock()
+        self._next_start = 0.0
+
+    async def wait(self) -> None:
+        if self._interval_seconds <= 0:
+            return
+        async with self._lock:
+            loop = asyncio.get_running_loop()
+            delay = self._next_start - loop.time()
+            if delay > 0:
+                await asyncio.sleep(delay)
+            self._next_start = loop.time() + self._interval_seconds
+
+
 @dataclass(frozen=True)
 class NewsImpact:
     symbol: str
@@ -182,24 +201,30 @@ async def _fetch_sec_impacts(
         except Exception as exc:
             log.warning("sec_ticker_map_fetch_failed error=%s", exc)
             return {}
-        for symbol in symbols:
+        sem = asyncio.Semaphore(settings.sec_request_concurrency)
+        limiter = _RequestStartLimiter(settings.sec_request_interval_seconds)
+
+        async def _fetch_one(symbol: str) -> None:
             cik = ticker_map.get(symbol)
             if cik is None:
-                continue
-            try:
-                payload = await _fetch_json(client, SEC_SUBMISSIONS_URL.format(cik=cik))
-            except Exception as exc:
-                log.warning("sec_news_fetch_failed symbol=%s error=%s", symbol, exc)
-                continue
-            impact = _recent_sec_filings(
-                symbol,
-                payload,
-                today=today,
-                settings=settings,
-            )
-            if impact is not None:
-                impacts[symbol] = impact
-            await asyncio.sleep(0.1)
+                return
+            async with sem:
+                await limiter.wait()
+                try:
+                    payload = await _fetch_json(client, SEC_SUBMISSIONS_URL.format(cik=cik))
+                except Exception as exc:
+                    log.warning("sec_news_fetch_failed symbol=%s error=%s", symbol, exc)
+                    return
+                impact = _recent_sec_filings(
+                    symbol,
+                    payload,
+                    today=today,
+                    settings=settings,
+                )
+                if impact is not None:
+                    impacts[symbol] = impact
+
+        await asyncio.gather(*(_fetch_one(symbol) for symbol in symbols))
     return impacts
 
 
@@ -337,28 +362,33 @@ async def _fetch_alpha_impacts(
         except Exception as exc:
             log.warning("alpha_vantage_earnings_failed error=%s", exc)
 
-        for symbol in selected:
-            try:
-                impact = await _fetch_alpha_news_for_symbol(
-                    client,
-                    symbol,
-                    settings=settings,
-                    api_key=api_key,
-                )
-            except Exception as exc:
-                log.warning("alpha_vantage_news_failed symbol=%s error=%s", symbol, exc)
-                continue
-            if impact is not None:
-                impacts[symbol] = _merge_impact(
-                    impacts.get(symbol),
-                    symbol=symbol,
-                    score=impact.score,
-                    reasons=list(impact.reasons),
-                    headlines=list(impact.recent_headlines),
-                    events=list(impact.upcoming_events),
-                    forms=list(impact.sec_forms),
-                    providers=list(impact.providers),
-                )
+        sem = asyncio.Semaphore(settings.alpha_vantage_request_concurrency)
+
+        async def _fetch_one(symbol: str) -> None:
+            async with sem:
+                try:
+                    impact = await _fetch_alpha_news_for_symbol(
+                        client,
+                        symbol,
+                        settings=settings,
+                        api_key=api_key,
+                    )
+                except Exception as exc:
+                    log.warning("alpha_vantage_news_failed symbol=%s error=%s", symbol, exc)
+                    return
+                if impact is not None:
+                    impacts[symbol] = _merge_impact(
+                        impacts.get(symbol),
+                        symbol=symbol,
+                        score=impact.score,
+                        reasons=list(impact.reasons),
+                        headlines=list(impact.recent_headlines),
+                        events=list(impact.upcoming_events),
+                        forms=list(impact.sec_forms),
+                        providers=list(impact.providers),
+                    )
+
+        await asyncio.gather(*(_fetch_one(symbol) for symbol in selected))
     return impacts
 
 
