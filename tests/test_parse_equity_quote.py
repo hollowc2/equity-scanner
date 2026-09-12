@@ -21,6 +21,7 @@ def _quote(
     ask: float | None = None,
     close: float | None = 90.0,
     volume: int | None = 1_000_000,
+    net_percent_change: float | None = None,
 ) -> QuoteV1:
     return QuoteV1(
         symbol="TEST",
@@ -33,6 +34,7 @@ def _quote(
         ask=ask,
         close=close,
         volume=volume,
+        net_percent_change=net_percent_change,
         stale=False,
     )
 
@@ -78,3 +80,38 @@ def test_price_choice_rejects_zero_last_and_falls_through_to_bid_ask_mid():
 
     assert price == 100.0
     assert source == "regular.bid_ask_mid"
+
+
+def test_missing_regular_net_percent_uses_selected_price_against_regular_close():
+    quote = _quote(session="extended", last=99.0, close=90.0, net_percent_change=None)
+
+    snapshot = parse_equity_quote("AAPL", quote, universes={"sp500"})
+
+    assert snapshot is not None
+    assert snapshot.prior_day_pct == 10.0
+
+
+def test_percent_disagreement_gate_is_unavailable_after_extended_session_is_selected():
+    extended = _quote(
+        session="extended", last=99.0, close=90.0, net_percent_change=-20.0
+    )
+    regular = extended.model_copy(update={"session": "regular"})
+
+    assert (
+        parse_equity_quote(
+            "AAPL",
+            extended,
+            universes={"sp500"},
+            max_price_disagreement_pct=5.0,
+        )
+        is not None
+    )
+    assert (
+        parse_equity_quote(
+            "AAPL",
+            regular,
+            universes={"sp500"},
+            max_price_disagreement_pct=5.0,
+        )
+        is None
+    )

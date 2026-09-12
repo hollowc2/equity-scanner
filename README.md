@@ -40,10 +40,12 @@ is out of scope for this repo's code and is a separate, explicitly gated checkpo
   server-side), not ButterflyGuy's raw two-session `{"quote", "extended"}` payload.
   Two real behavior changes fall out of that, documented on `parse_equity_quote`.
 - `universes.py` — ported `equity_scan/universes.py`: S&P 500 (GitHub CSV) /
-  Nasdaq-100 (Wikipedia scrape) / NASDAQ+NYSE listed-symbol (nasdaqtrader.com)
+  Nasdaq-100 (header-identified Wikipedia table) / NASDAQ+NYSE listed-symbol (nasdaqtrader.com)
   fetchers, local universe file I/O, and the liquid-universe price/volume filters
   (adapted for `QuoteV1`). equity-scanner refreshes its own universe files rather
-  than reading ButterflyGuy's — see the module docstring for why.
+  than reading ButterflyGuy's — see the module docstring for why. Refreshes reject
+  implausibly small upstream results, replace files atomically, and perform no writes
+  under `--dry-run`.
 - `news.py` — ported `equity_scan/news.py`: SEC EDGAR full-text search +
   company-facts, and Alpha Vantage news/earnings, keyed by ticker. Zero
   Schwab/gateway dependency. Per-provider concurrency is bounded; SEC request starts
@@ -107,6 +109,13 @@ recorded-fixture responses via a monkeypatched `urllib.request.urlopen` for the
 universe network fetchers, patched `_post` for the Discord notifier) — no live
 Schwab credentials, no running gateway, no live network calls.
 
+The deterministic cross-repository parity tests cover universe loading, quote-driven
+filtering/ranking, RVOL and prior-session calculations, news enrichment, opening and
+catalyst ranking, mover sections, Discord chunking, and Markdown/JSON archives. The
+strict report comparator gates every ranked and mover section plus news payloads. The
+same-session comparator separately records capture-sensitive differences caused by
+sequential quote collection.
+
 ```
 uv run pytest
 uv run ruff check .
@@ -116,10 +125,14 @@ uv run ruff check .
 
 Deployment and schedule migration require separate approval. The current candidate
 gateway is never modified by this project. See `docs/dependency-map.md` for the
-extraction boundary and documented behavior differences.
+extraction boundary and documented behavior differences, and
+`docs/deployment-runbook.md` for the candidate, parity, schedule, and rollback gates.
 
 `compose.candidate.yml` is a dry-run-only, one-shot candidate definition. It requires
 an immutable `EQUITY_SCANNER_IMAGE` and an external scanner-owned secret env file.
 The scheduled wrapper targets the production read-only gateway at `127.0.0.1:8011`
 by default; `EQUITY_SCANNER_GATEWAY_URL` can override that non-secret endpoint.
-`infra/equity_scanner_candidate.cron` remains uninstalled until same-session parity.
+`infra/equity_scanner_candidate.cron` and
+`infra/equity_scanner_universe_refresh_candidate.cron` remain uninstalled. Both
+candidate services are dry-run-only; the refresh service also mounts universe data
+read-only.

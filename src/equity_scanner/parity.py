@@ -18,6 +18,7 @@ SECTIONS = (
     "premarket_gainers",
     "premarket_losers",
 )
+RANKED_SECTIONS = (*SECTIONS, "opening_focus", "catalyst_watch")
 CALCULATED_FIELDS = (
     "price",
     "prior_day_pct",
@@ -60,7 +61,7 @@ def _symbol(item: dict[str, Any]) -> str | None:
 
 def _snapshots(report: dict[str, Any]) -> dict[str, dict[str, Any]]:
     snapshots: dict[str, dict[str, Any]] = {}
-    for section in (*SECTIONS, "opening_focus", "catalyst_watch"):
+    for section in RANKED_SECTIONS:
         for item in report.get(section, []):
             payload = item.get("snapshot", item)
             if isinstance(payload, dict) and payload.get("symbol"):
@@ -452,7 +453,7 @@ def compare_reports(
         }
 
     section_differences = {}
-    for section in SECTIONS:
+    for section in RANKED_SECTIONS:
         reference_symbols = [_symbol(item) for item in reference.get(section, [])]
         candidate_symbols = [_symbol(item) for item in candidate.get(section, [])]
         if reference_symbols != candidate_symbols:
@@ -488,8 +489,38 @@ def compare_reports(
     if failure := _quote_coverage_failure(candidate):
         coverage_failures["candidate"] = failure
 
+    mover_differences = {}
+    for section in ("movers_up", "movers_down"):
+        if reference.get(section, []) != candidate.get(section, []):
+            mover_differences[section] = {
+                "reference": reference.get(section, []),
+                "candidate": candidate.get(section, []),
+            }
+
+    opening_focus_detail_differences = None
+    if reference.get("opening_focus", []) != candidate.get("opening_focus", []):
+        opening_focus_detail_differences = {
+            "reference": reference.get("opening_focus", []),
+            "candidate": candidate.get("opening_focus", []),
+        }
+
+    news_differences = []
+    for symbol in shared:
+        left = reference_snapshots[symbol].get("news")
+        right = candidate_snapshots[symbol].get("news")
+        if left != right:
+            news_differences.append(
+                {"symbol": symbol, "reference": left, "candidate": right}
+            )
+
     passed = not (
-        section_differences or value_differences or count_differences or coverage_failures
+        section_differences
+        or mover_differences
+        or opening_focus_detail_differences
+        or value_differences
+        or news_differences
+        or count_differences
+        or coverage_failures
     )
     return {
         "verdict": "pass" if passed else "difference",
@@ -503,9 +534,12 @@ def compare_reports(
         "count_differences": count_differences,
         "coverage_failures": coverage_failures,
         "section_differences": section_differences,
+        "mover_differences": mover_differences,
+        "opening_focus_detail_differences": opening_focus_detail_differences,
         "calculated_value_differences": value_differences,
+        "news_differences": news_differences,
         "shared_ranked_symbols": len(shared),
-        "excluded_from_gate": ["opening_focus", "catalyst_watch", "news_impacts"],
+        "excluded_from_gate": [],
     }
 
 

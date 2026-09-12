@@ -11,6 +11,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 
+import pytest
 from schwab_gateway_sdk import QuoteV1
 
 from equity_scanner import universes
@@ -41,9 +42,11 @@ SP500_CSV_SAMPLE = (
 )
 
 NQ100_WIKI_SAMPLE = """
-<table><tbody>
-<tr><td>AAPL</td><td>Apple Inc.</td></tr>
-<tr><td>MSFT</td><td>Microsoft</td></tr>
+<table class="infobox"><tr><th>Constituents</th><td>102</td></tr></table>
+<table class="wikitable sortable">
+<tbody><tr><th id="ticker">Ticker</th><th id="company">Company</th></tr>
+<tr><td id="aapl">AAPL</td><td><a href="/wiki/Apple">Apple Inc.</a></td></tr>
+<tr><td><a href="/wiki/Microsoft">MSFT</a></td><td>Microsoft</td></tr>
 <tr><td>AAPL</td><td>Apple Inc.</td></tr>
 </tbody></table>
 """
@@ -144,6 +147,76 @@ def test_fetch_nq100_tickers_dedupes_using_recorded_fixture(monkeypatch):
         _fake_urlopen({universes.NQ100_WIKI_URL: NQ100_WIKI_SAMPLE}),
     )
     assert universes.fetch_nq100_tickers() == ["AAPL", "MSFT"]
+
+
+def test_refresh_builtin_universes_dry_run_does_not_write(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        universes,
+        "fetch_sp500_tickers",
+        lambda: [f"SP{i}" for i in range(500)],
+    )
+    monkeypatch.setattr(
+        universes,
+        "fetch_nq100_tickers",
+        lambda: [f"NQ{i}" for i in range(100)],
+    )
+    monkeypatch.setattr(
+        universes,
+        "fetch_sp500_sectors",
+        lambda: {f"SP{i}": "Sector" for i in range(500)},
+    )
+
+    counts = universes.refresh_builtin_universes(tmp_path, dry_run=True)
+
+    assert counts == {"sp500": 500, "nq100": 100, "sectors": 600}
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_refresh_builtin_universes_preserves_files_when_fetch_is_implausibly_small(
+    tmp_path, monkeypatch
+):
+    existing = {
+        "sp500.txt": "OLD-SP500\n",
+        "nq100.txt": "OLD-NQ100\n",
+        "sectors.json": '{"OLD": "Sector"}\n',
+    }
+    for name, content in existing.items():
+        (tmp_path / name).write_text(content)
+    monkeypatch.setattr(
+        universes,
+        "fetch_sp500_tickers",
+        lambda: [f"SP{i}" for i in range(500)],
+    )
+    monkeypatch.setattr(universes, "fetch_nq100_tickers", lambda: [])
+    monkeypatch.setattr(
+        universes,
+        "fetch_sp500_sectors",
+        lambda: {f"SP{i}": "Sector" for i in range(500)},
+    )
+
+    with pytest.raises(RuntimeError, match=r"Refusing to replace nq100: fetched 0"):
+        universes.refresh_builtin_universes(tmp_path)
+
+    for name, content in existing.items():
+        assert (tmp_path / name).read_text() == content
+
+
+def test_atomic_universe_write_preserves_existing_file_if_replace_fails(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "nq100.txt"
+    path.write_text("EXISTING\n")
+
+    def fail_replace(_source, _destination):
+        raise OSError("simulated replace failure")
+
+    monkeypatch.setattr(universes.os, "replace", fail_replace)
+
+    with pytest.raises(OSError, match="simulated replace failure"):
+        universes.write_universe_file(path, ["AAPL", "MSFT"])
+
+    assert path.read_text() == "EXISTING\n"
+    assert list(tmp_path.iterdir()) == [path]
 
 
 def test_load_universe_reads_ticker_files_and_strips_comments(tmp_path):

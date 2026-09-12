@@ -5,7 +5,7 @@ at the point a live post/fetch is actually attempted — see run.py)."""
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import ClassVar, Literal
 
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -18,12 +18,11 @@ class AppSettings(BaseSettings):
 
     gateway_url: str = Field(validation_alias="SCHWAB_GATEWAY_URL")
     gateway_api_key: SecretStr = Field(validation_alias="SCHWAB_GATEWAY_API_KEY")
-    gateway_client_identity: Literal["equity-scanner"] = Field(
-        default="equity-scanner", validation_alias="SCHWAB_GATEWAY_CLIENT_IDENTITY"
-    )
-    gateway_priority: Literal["background"] = Field(
-        default="background", validation_alias="SCHWAB_GATEWAY_PRIORITY"
-    )
+    # These document the required server-side key record. They are deliberately not
+    # environment-overridable because the SDK authenticates by key; SchwabGateway,
+    # not a caller-supplied header, assigns application identity and priority.
+    gateway_client_identity: ClassVar[Literal["equity-scanner"]] = "equity-scanner"
+    gateway_priority: ClassVar[Literal["background"]] = "background"
     gateway_timeout_seconds: float = Field(
         default=5.0, gt=0, validation_alias="SCHWAB_GATEWAY_TIMEOUT_SECONDS"
     )
