@@ -179,9 +179,9 @@ an immutable `EQUITY_SCANNER_IMAGE` and an external scanner-owned secret env fil
 The scheduled wrapper targets the production read-only gateway at `127.0.0.1:8011`
 by default; `EQUITY_SCANNER_GATEWAY_URL` can override that non-secret endpoint.
 `infra/equity_scanner_candidate.cron` and
-`infra/equity_scanner_universe_refresh_candidate.cron` remain uninstalled. Both
-candidate services are dry-run-only; the refresh service also mounts universe data
-read-only.
+`infra/equity_scanner_universe_refresh_candidate.cron` remain uninstalled until
+same-session parity. Both candidate services are dry-run-only; the refresh service
+also mounts universe data read-only.
 
 ### Production schedules
 
