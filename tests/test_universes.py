@@ -301,3 +301,24 @@ def test_load_sector_map_falls_back_to_liquid_meta_exchange(tmp_path):
     sectors = universes.load_sector_map(tmp_path)
     assert sectors["AAPL"] == "Information Technology"  # sectors.json wins over exchange fallback
     assert sectors["XOM"] == "NYSE"
+
+
+@pytest.mark.parametrize("symbol", ["AIIA.R", "AIIA/R", "CELG.R"])
+def test_nyse_listing_rights_are_not_common_stock(symbol):
+    text = (
+        "ACT Symbol|Security Name|Exchange|CQS Symbol|ETF|Round Lot Size|Test Issue|NASDAQ Symbol\n"
+        f"{symbol}|Listing Rights|N|{symbol}|N|100|N|{symbol}\n"
+        "BRK.A|Berkshire Class A|N|BRK.A|N|100|N|BRK.A\n"
+    )
+    assert universes.parse_nyse_listed_text(text) == ["BRK.A"]
+
+
+
+def test_nyse_cqs_symbol_identifies_warrants_disguised_as_class_shares():
+    text = (
+        "ACT Symbol|Security Name|Exchange|CQS Symbol|ETF|Round Lot Size|Test Issue|NASDAQ Symbol\n"
+        "NE.A|Noble Tranche 2 Warrants|N|NE.WS.A|N|100|N|NE+A\n"
+        "NE|Noble Ordinary Shares|N|NE|N|100|N|NE\n"
+        "BRK.A|Berkshire Class A|N|BRK.A|N|100|N|BRK.A\n"
+    )
+    assert universes.parse_nyse_listed_text(text) == ["NE", "BRK.A"]

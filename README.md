@@ -136,3 +136,22 @@ by default; `EQUITY_SCANNER_GATEWAY_URL` can override that non-secret endpoint.
 `infra/equity_scanner_universe_refresh_candidate.cron` remain uninstalled. Both
 candidate services are dry-run-only; the refresh service also mounts universe data
 read-only.
+
+### Production schedules
+
+`compose.production.yml` provides one-shot production jobs with a read-only root
+filesystem. The scan reads `data/universes`; only the refresh job can write there.
+`configs/equity_scan.production.yaml` serializes gateway quote and history requests,
+and both production cron wrappers share a lock to prevent overlapping jobs.
+The image is pinned through `/opt/equity-scanner/.production-image`.
+
+The scan's host launcher reads only the equity Discord destination and optional news
+settings from an external env file, defaulting to `/opt/butterflyguy/.env`. It maps
+`EQUITY_DISCORD_WEBHOOK_URL` to the standalone scanner's environment name in memory.
+It does not use ButterflyGuy runtime code or change the external file. Override
+`EQUITY_SCANNER_NOTIFICATION_ENV` to reference a separately provisioned notification
+file. Gateway credentials remain in `/opt/equity-scanner/secrets/gateway.env`.
+
+`infra/equity_scanner_production.cron` schedules the scan at 06:00 Pacific on weekdays
+and universe refresh at 20:00 Pacific on Sunday. Install only after the deployment
+runbook's validation and rollback preparation; never run both old and new owners.

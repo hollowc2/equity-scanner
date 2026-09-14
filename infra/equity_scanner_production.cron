@@ -1,0 +1,3 @@
+# Host cron is UTC; wrappers admit exactly one Pacific slot.
+0 13,14 * * 1-5 /opt/equity-scanner/tools/run_production_scan_cron.sh >> /opt/equity-scanner/reports/production-scan.log 2>&1
+0 3,4 * * 1 /opt/equity-scanner/tools/run_production_refresh_cron.sh >> /opt/equity-scanner/reports/production-refresh.log 2>&1

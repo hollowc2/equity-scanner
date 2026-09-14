@@ -28,9 +28,17 @@ def _run_wrapper(
     scanner_root = tmp_path / "scanner"
     scanner_root.mkdir()
     (scanner_root / ".candidate-image").write_text("candidate@sha256:abc\n")
+    (scanner_root / ".production-image").write_text("production@sha256:abc\n")
     (scanner_root / "secrets").mkdir()
     (scanner_root / "secrets" / "gateway.env").write_text("placeholder=true\n")
     (scanner_root / "compose.candidate.yml").write_text("services: {}\n")
+    launcher_dir = scanner_root / "src" / "equity_scanner"
+    launcher_dir.mkdir(parents=True)
+    (launcher_dir / "production_job.py").write_text(
+        (REPO / "src/equity_scanner/production_job.py").read_text()
+    )
+    notification_file = tmp_path / "notifications.env"
+    notification_file.write_text("EQUITY_DISCORD_WEBHOOK_URL=https://example.invalid/test\n")
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     log_path = tmp_path / "docker.log"
@@ -54,6 +62,7 @@ def _run_wrapper(
         "EQUITY_SCANNER_LOCK_FILE": str(tmp_path / "morning.lock"),
         "EQUITY_SCANNER_REFRESH_LOCK_FILE": str(tmp_path / "refresh.lock"),
         "WRAPPER_DOCKER_LOG": str(log_path),
+        "EQUITY_SCANNER_NOTIFICATION_ENV": str(notification_file),
     }
     monkeypatch.delenv("SCHWAB_GATEWAY_API_KEY", raising=False)
     lock_name = "refresh.lock" if "universe" in wrapper else "morning.lock"
@@ -154,3 +163,36 @@ def test_universe_refresh_wrapper_is_sunday_evening_and_dry_run_only(
     compose = (REPO / "compose.candidate.yml").read_text()
     assert 'command: ["--dry-run", "--scan-config"' in compose
     assert '"./data:/app/data:ro"' in compose
+
+
+@pytest.mark.parametrize(
+    ("wrapper", "weekday", "local_time", "service"),
+    (
+        ("run_production_scan_cron.sh", "3", "06:00", "scan"),
+        ("run_production_refresh_cron.sh", "7", "20:00", "refresh-universes"),
+    ),
+)
+def test_production_wrappers_select_release_and_production_compose(
+    tmp_path, monkeypatch, wrapper, weekday, local_time, service
+):
+    result, invocation = _run_wrapper(
+        tmp_path, monkeypatch, wrapper, weekday=weekday, local_time=local_time
+    )
+    assert result.returncode == 0
+    assert "compose -f compose.production.yml run --rm" in invocation
+    assert "production@sha256:abc" in invocation
+    assert service in invocation
+
+
+def test_production_mounts_limit_universe_writes_to_refresh():
+    import yaml
+
+    compose = yaml.safe_load((REPO / "compose.production.yml").read_text())
+    scan = compose["services"]["scan"]
+    refresh = compose["services"]["refresh-universes"]
+    assert "./data:/app/data:ro" in scan["volumes"]
+    assert "./data:/app/data:rw" in refresh["volumes"]
+    for service in (scan, refresh):
+        assert "--dry-run" not in service["command"]
+        assert service["read_only"] is True
+        assert service["restart"] == "no"

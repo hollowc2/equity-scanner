@@ -1,0 +1,43 @@
+name: equity_scanner_production
+
+services:
+  scan:
+    image: "${EQUITY_SCANNER_IMAGE:?set immutable image ID or repository digest}"
+    pull_policy: never
+    env_file:
+      - "${EQUITY_SCANNER_SECRET_ENV:?set scanner-owned secret env path}"
+    environment:
+      SCHWAB_GATEWAY_TIMEOUT_SECONDS: "15"
+    user: "${EQUITY_SCANNER_UID:-1001}:${EQUITY_SCANNER_GID:-1001}"
+    command: ["--scan-config", "/app/configs/equity_scan.production.yaml"]
+    volumes:
+      - "./configs:/app/configs:ro"
+      - "./data:/app/data:ro"
+      - "./reports:/app/reports:rw"
+    network_mode: host
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    restart: "no"
+
+  refresh-universes:
+    image: "${EQUITY_SCANNER_IMAGE:?set immutable image ID or repository digest}"
+    pull_policy: never
+    env_file:
+      - "${EQUITY_SCANNER_SECRET_ENV:?set scanner-owned secret env path}"
+    environment:
+      SCHWAB_GATEWAY_TIMEOUT_SECONDS: "15"
+    user: "${EQUITY_SCANNER_UID:-1001}:${EQUITY_SCANNER_GID:-1001}"
+    entrypoint: ["/app/.venv/bin/equity-scanner-refresh-universes"]
+    command: ["--scan-config", "/app/configs/equity_scan.production.yaml"]
+    volumes:
+      - "./configs:/app/configs:ro"
+      - "./data:/app/data:rw"
+      - "./reports:/app/reports:rw"
+    network_mode: host
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    restart: "no"

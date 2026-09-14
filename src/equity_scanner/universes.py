@@ -293,7 +293,7 @@ def _is_common_equity_symbol(symbol: str) -> bool:
     """Exclude preferreds, warrants, units, and other non-common listings."""
     if any(ch in symbol for ch in ("$", "^", "+", "=")):
         return False
-    if ".U" in symbol or symbol.endswith(".W") or symbol.endswith(".WS"):
+    if ".U" in symbol or ".WS" in symbol or symbol.endswith((".W", ".R", "/R")):
         return False
     return True
 
@@ -341,7 +341,9 @@ def parse_nyse_listed_text(text: str) -> list[str]:
         test_issue = fields[6].strip().upper()
         if exchange != "N" or not symbol or test_issue == "Y" or etf == "Y":
             continue
-        if not _is_common_equity_symbol(symbol):
+        if not _is_common_equity_symbol(symbol) or not _is_common_equity_symbol(
+            fields[3].strip().upper()
+        ):
             continue
         symbols.append(symbol)
     return symbols

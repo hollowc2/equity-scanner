@@ -1,0 +1,51 @@
+universes: [sp500, nq100, liquid, custom]
+universe_dir: data/universes
+custom_watchlist: data/universes/custom.txt
+
+filters:
+  min_price: 10.0
+  min_volume: 500000
+  prior_day_min_pct: 3.0
+  premarket_min_gap_pct: 2.0
+  min_rvol: 0.05
+  max_abs_pct: 50.0
+  max_price_disagreement_pct: 5.0
+  max_reference_price_deviation_pct: 25.0
+  require_index_membership: false
+
+limits:
+  prior_gainers: 15
+  prior_losers: 15
+  premarket_gainers: 15
+  premarket_losers: 15
+  opening_focus: 12
+  catalyst_watch: 12
+  movers_per_bucket: 10
+
+news:
+  enabled: true
+  providers: [sec, alpha_vantage]
+  recent_days: 3
+  upcoming_days: 5
+  max_symbols: 80
+  min_score_for_focus: 4.0
+  request_timeout_seconds: 10.0
+  sec_user_agent_env: SEC_USER_AGENT
+  sec_request_concurrency: 4
+  sec_request_interval_seconds: 0.1
+  alpha_vantage_api_key_env: ALPHA_VANTAGE_API_KEY
+  alpha_vantage_max_news_symbols: 20
+  alpha_vantage_news_limit: 20
+  alpha_vantage_request_concurrency: 4
+
+batch_size: 100
+quote_fetch_concurrency: 1
+rvol_lookback_days: 20
+rvol_fetch_concurrency: 1
+group_by_sector: true
+include_movers: false
+movers_min_abs_pct: 1.0
+mover_indexes: [NASDAQ, NYSE, EQUITY_ALL]
+premarket_start_et: "04:00"
+report_dir: reports/equity_scans
+context_symbols: [$SPX, $COMPX, $DJI, SPY, QQQ]

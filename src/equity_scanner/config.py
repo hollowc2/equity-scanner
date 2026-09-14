@@ -36,7 +36,7 @@ class AppSettings(BaseSettings):
     alpha_vantage_api_key: SecretStr | None = Field(
         default=None, validation_alias="ALPHA_VANTAGE_API_KEY"
     )
-    discord_webhook_url: str | None = Field(
+    discord_webhook_url: SecretStr | None = Field(
         default=None, validation_alias="EQUITY_SCANNER_DISCORD_WEBHOOK_URL"
     )
 

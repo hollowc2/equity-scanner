@@ -38,6 +38,7 @@ async def refresh_liquid_universe(
     rvol_lookback_days: int,
     rvol_fetch_concurrency: int,
     dry_run: bool = False,
+    quote_fetch_concurrency: int = 4,
 ) -> dict[str, int]:
     """Build liquid.txt from exchange seeds validated via gateway quotes and volume."""
     base = Path(universe_dir)
@@ -45,7 +46,9 @@ async def refresh_liquid_universe(
     seed_symbols = sorted(exchange_map)
     log.info("liquid_universe_seed_loaded symbols=%d", len(seed_symbols))
 
-    quotes = await provider.get_equity_quotes(seed_symbols, batch_size=batch_size)
+    quotes = await provider.get_equity_quotes(
+        seed_symbols, batch_size=batch_size, concurrency=quote_fetch_concurrency
+    )
     price_passed, prices = filter_symbols_by_price(
         seed_symbols,
         quotes,
@@ -128,6 +131,7 @@ async def run_refresh(
                 else float(scan_config.filters.min_volume)
             ),
             batch_size=scan_config.batch_size,
+            quote_fetch_concurrency=scan_config.quote_fetch_concurrency,
             rvol_lookback_days=scan_config.rvol_lookback_days,
             rvol_fetch_concurrency=scan_config.rvol_fetch_concurrency,
             dry_run=dry_run,

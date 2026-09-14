@@ -91,3 +91,86 @@ the venue Level II portion today. Its new Level I/chart recorder and generic
 session-history exporter are the intended owners of the remaining behavior, but they
 still require supervised runtime proof. Do not remove ButterflyGuy's raw recorder/helper
 or candle backfill until that proof is preserved as described in `dependency-map.md`.
+
+
+## Production deployment prepared 2026-09-13
+
+The explicit migration request authorizes replacing both ButterflyGuy schedules on
+Helios. Production definitions are `compose.production.yml`,
+`configs/equity_scan.production.yaml`, and `infra/equity_scanner_production.cron`.
+The separate production wrappers use `.production-image`; candidate definitions remain
+available for rollback and investigation.
+
+Verified baseline:
+
+- Scanner source: `0e9d60761892ad493571822ba3b62ebae7fa44b3`.
+- Installed image: `sha256:08cb6979962cb6f4a3b50dd287bbc704c2356ab849e2c24c814e392799cad331`.
+- SDK pin: `5b8f1d76aa9fb97a300172d39e7afcc4ab60e83a`.
+- ButterflyGuy release: `929429978a09c153afb5260771eff84386762ce4`.
+- September 10 sequential-skew-aware comparison reports pass. The current release
+  also has a September 14 one-day parity schedule installed.
+- Gateway container `schwab_gateway_live` is healthy, port 8011.
+- Existing scanner secret file provides gateway settings only. The production host
+  launcher reads only `EQUITY_DISCORD_WEBHOOK_URL`, `SEC_USER_AGENT`, and
+  `ALPHA_VANTAGE_API_KEY` from `/opt/butterflyguy/.env`, mapping the equity webhook
+  to the scanner environment name in memory. No credential file is changed or
+  duplicated, and unrelated settings are not passed to the container. Override
+  `EQUITY_SCANNER_NOTIFICATION_ENV` to select another external file with these names.
+  This is an external configuration dependency; no ButterflyGuy runtime is used.
+
+Cutover procedure once notification configuration is resolved:
+
+1. Create a timestamped deployment backup directory on Helios; capture `crontab -l`
+   verbatim into `crontab.before` with mode 0600. Record image and source identifiers.
+2. Install the production Compose, config, and wrappers. Set `.production-image` to
+   the verified immutable image above. Initialize `data/universes` from the current
+   ButterflyGuy universe files (market data only), preserving custom watchlist and
+   sector metadata. Record input checksums. Preserve all historical files.
+3. Validate Compose without displaying resolved environments. Run a bounded dry-run
+   scan into a separate validation report directory with production config and strict
+   quote coverage; verify full coverage and gateway health/metrics before and after.
+   Validate refresh with `--dry-run` before enabling its writable production job.
+4. Comment out exactly the old ButterflyGuy morning-scan and universe-refresh command
+   lines. Disable the September 14 scanner parity commands because they depend on the
+   replaced reference owner. Install the two production cron lines. Compare against
+   the captured crontab and assert one executable owner per production job.
+5. Observe the first scheduled archive and Discord delivery, and the first scheduled
+   refresh. A completed deployment is distinct from those future observations.
+
+Rollback: run `crontab /opt/equity-scanner/.deploy-backups/<cutover>/crontab.before`.
+This restores the original schedule owners and removes the production entries. If a
+new one-shot scanner job is still running, stop only that identified production job
+before restoring notification ownership. Leave gateway, trading containers, database,
+secrets, historical reports, and universe evidence intact. No gateway rebuild,
+restart, credential change, trading change, or database migration is part of cutover.
+
+
+Production validation findings (2026-09-13, before cron installation):
+
+- Existing daily-scans webhook validated through a read-only metadata request.
+- Normal Sunday scan correctly skips non-trading days.
+- Initial full dry-run scan and refresh failed with gateway errors. Running the
+  checks together also caused background queue pressure. Production now uses one
+  quote request at a time, one history request at a time, a 15-second SDK timeout,
+  and a shared production-job lock. Strict complete-coverage behavior is unchanged.
+- `quote_fetch_concurrency` defaults to four for existing configs and is constrained
+  to 1–4; production explicitly selects one.
+- Docker build context uses an allowlist so external secrets and deployment backups
+  cannot enter an image build.
+- Local validation: 117 tests passed, Ruff passed, package build passed.
+- Revised image and sequential live validation remain required before installing
+  `crontab.proposed`; staging files is not a successful production cutover.
+
+
+The sequential full-scan validation passed with all 1,897 requested symbols returned,
+zero failed quote batches, and one concurrent quote call. Its Sunday quotes were all
+marked stale; this validates plumbing, not live premarket timeliness. The validation
+archive is isolated under `reports/production-validation/report`.
+
+The exchange-wide refresh exposed two concrete listing-parser defects: `.R` rights
+(e.g. `AIIA.R`, translated to `AIIA/R`) and an ACT symbol that looks like a class share
+(`NE.A`) but whose CQS symbol identifies a warrant (`NE.WS.A`). Both are outside the
+common-stock universe. The parser now excludes rights and checks the NYSE CQS symbol
+for warrant designators while preserving real class shares such as `BRK.A`.
+Regression tests cover these cases. Current local suite: 121 passed; Ruff and package
+build passed. Refresh validation must pass on the corrected image before cron cutover.
