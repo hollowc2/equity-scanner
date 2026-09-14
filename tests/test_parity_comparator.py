@@ -37,6 +37,53 @@ def test_ranking_and_calculated_value_differences_are_reported():
     assert any(item["field"] == "price" for item in result["calculated_value_differences"])
 
 
+@pytest.mark.parametrize("section", ("opening_focus", "catalyst_watch"))
+def test_strict_mode_gates_all_ranked_sections(section):
+    reference = report()
+    candidate = report()
+    reference[section] = [{"snapshot": {"symbol": "WIN"}}]
+    candidate[section] = []
+
+    result = compare_reports(reference, candidate)
+
+    assert result["verdict"] == "difference"
+    assert section in result["section_differences"]
+
+
+def test_strict_mode_gates_mover_sections_and_news_payloads():
+    reference = report()
+    candidate = report()
+    reference["movers_up"] = [{"symbol": "AAPL", "changePercent": 2.0}]
+    candidate["movers_up"] = [{"symbol": "MSFT", "changePercent": 2.0}]
+    reference["prior_gainers"][0]["news"] = {
+        "score": 6.0,
+        "reasons": ["recent SEC filing"],
+    }
+    candidate["prior_gainers"][0]["news"] = None
+
+    result = compare_reports(reference, candidate)
+
+    assert result["verdict"] == "difference"
+    assert "movers_up" in result["mover_differences"]
+    assert result["news_differences"][0]["symbol"] == "WIN"
+
+
+def test_strict_mode_gates_opening_focus_scores_and_reasons():
+    reference = report()
+    candidate = report()
+    reference["opening_focus"] = [
+        {"snapshot": {"symbol": "WIN"}, "score": 9.0, "reasons": ["gap with volume"]}
+    ]
+    candidate["opening_focus"] = [
+        {"snapshot": {"symbol": "WIN"}, "score": 8.0, "reasons": ["gap with volume"]}
+    ]
+
+    result = compare_reports(reference, candidate)
+
+    assert result["verdict"] == "difference"
+    assert result["opening_focus_detail_differences"] is not None
+
+
 def test_sequential_mode_records_dynamic_changes_without_failing_stable_gate():
     reference = report()
     candidate = report(price=11.0)

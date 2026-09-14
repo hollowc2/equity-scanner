@@ -32,12 +32,26 @@
   `up` and `down`.
 - OAuth/token loading and `schwab-py` are intentionally absent; the scoped API key is
   supplied only through the environment and identifies `equity-scanner` at background
-  priority in SchwabGateway.
+  priority in SchwabGateway. Identity and priority come from the gateway's server-side
+  key record, not caller-controlled headers; deployment evidence must verify that record
+  without printing the key.
 
 ## Intentional behavior differences
 
 - Gateway quotes are already flattened to the freshest regular/extended session; the
-  raw two-session Schwab payload is not reconstructed.
+  raw two-session Schwab payload is not reconstructed. Price selection therefore uses
+  the selected session's positive `last`, then `mark`, then bid/ask midpoint.
+- The regular-price versus Schwab `netPercentChange` disagreement check runs only when
+  `QuoteV1.session == "regular"`. Once the gateway selects an extended session, the
+  discarded regular price cannot be reconstructed and that check is unavailable.
+- `QuoteV1.volume` belongs to the selected session. During premarket it becomes both
+  scanner `volume` and `premarket_volume` when the selected session is extended; it is
+  not the original payload's simultaneous prior regular-session volume plus extended
+  volume pair. Outside premarket, extended-session volume is never labeled as
+  premarket RVOL.
+- `QuoteV1.close` and `net_percent_change` remain the regular-session reference fields.
+  If net percent change is absent, the scanner derives it from the selected current
+  price and regular close, because no separate regular last is available.
 - A quote marked stale is retained because Gateway quote freshness reflects the selected
   trade event; during premarket an old last trade can coexist with otherwise usable quote
   fields. The scanner exposes this as the `gateway_stale` data-quality flag and still
@@ -46,3 +60,29 @@
   and omitted, making the partial result explicit without aborting all other symbols.
 - Authentication/authorization and malformed-contract failures are fail-closed. Only
   transient capacity, timeout, and upstream-unavailable errors receive bounded retry.
+- Gateway quote requests are deduplicated, class-share dots are translated at the
+  gateway boundary, and batches are capped at the gateway contract's 100-symbol limit.
+
+## Additive evidence differences
+
+The standalone JSON archive adds `phase_timings_ms` and `quote_coverage`. These fields
+do not alter scan selection or report text. Deterministic parity verifies the remaining
+archive payload against ButterflyGuy, while runtime parity requires internally
+consistent, complete quote-coverage evidence before it can pass.
+
+## Raw equity recording ownership
+
+- SchwabGateway already owns the generic venue-specific Level II capture: bounded
+  symbols/duration, raw frames, normalized snapshots, reconnect/continuity evidence,
+  hashes, a non-overwriting manifest, and catalog/retention metadata. New Level II
+  capture should use that recorder rather than ButterflyGuy's raw stream recorder.
+- SchwabGateway's `schwab-gateway-capture-equity-streams` now owns bounded
+  `CHART_EQUITY` and Level I raw/relabeled capture with the same short token-lock
+  bootstrap, reconnect evidence, hashes, and non-overwriting manifest policy. It must
+  pass local and supervised runtime proof before the ButterflyGuy implementation is
+  removed.
+- ButterflyGuy's one-minute candle backfill has no downstream backtest or report
+  consumer in the repository. SchwabGateway's SDK-backed
+  `schwab-gateway-export-session-history` now owns the generic replacement: it combines
+  regular/extended one-minute bars, rejects stale/empty evidence, hashes its output,
+  and never overwrites a capture. Removal still waits for supervised runtime proof.

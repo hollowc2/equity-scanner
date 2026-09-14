@@ -7,6 +7,7 @@ import json
 
 import httpx
 import pytest
+from pydantic import SecretStr
 from schwab_gateway_sdk import QuoteV1
 
 from equity_scanner import run
@@ -42,7 +43,10 @@ async def test_parity_quote_recovery_mode_requires_dry_run(mode):
         await run.run_scan(quote_coverage_mode=mode)
 
 
-async def test_run_scan_persists_phase_timings_with_fake_boundaries(monkeypatch, tmp_path):
+@pytest.mark.parametrize("dry_run", [True, False])
+async def test_run_scan_persists_phase_timings_with_fake_boundaries(
+    monkeypatch, tmp_path, dry_run
+):
     generated_at = dt.datetime(2026, 8, 26, 8, 0, tzinfo=EASTERN)
     now_utc = generated_at.astimezone(dt.timezone.utc)
 
@@ -51,7 +55,7 @@ async def test_run_scan_persists_phase_timings_with_fake_boundaries(monkeypatch,
         alpha_vantage_api_key = None
         gateway_max_attempts = 1
         gateway_retry_backoff_seconds = 0.0
-        discord_webhook_url = None
+        discord_webhook_url = SecretStr("https://example.invalid/daily-scans")
 
     class FakeGateway:
         async def __aenter__(self):
@@ -150,7 +154,19 @@ async def test_run_scan_persists_phase_timings_with_fake_boundaries(monkeypatch,
     monkeypatch.setattr(run, "build_gateway_client", lambda _settings: FakeGateway())
     monkeypatch.setattr(run, "GatewayEquityDataProvider", FakeProvider)
 
-    messages = await run.run_scan(scan_config_path="unused.yaml", dry_run=True)
+    posted = []
+
+    class FakeNotifier:
+        def __init__(self, webhook):
+            assert isinstance(webhook, str)
+            assert webhook == "https://example.invalid/daily-scans"
+
+        async def notify_messages(self, messages):
+            posted.extend(messages)
+
+    monkeypatch.setattr(run, "DiscordNotifier", FakeNotifier)
+    messages = await run.run_scan(scan_config_path="unused.yaml", dry_run=dry_run)
+    assert posted == ([] if dry_run else messages)
 
     payload = json.loads((tmp_path / "reports" / "2026-08-26.json").read_text())
     timings = payload["phase_timings_ms"]

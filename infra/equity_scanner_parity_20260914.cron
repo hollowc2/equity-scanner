@@ -1,0 +1,9 @@
+# One-day bounded parity proof for Monday 2026-09-14. The 04:10 UTC input
+# freeze runs after Sunday's 20:00 Pacific universe refresh. ButterflyGuy runs
+# the reference at 09:00 ET; the candidate starts at 09:10 ET and fails closed
+# at 09:20 ET. The 09:45 ET comparison is offline and makes no gateway calls.
+10 4 14 9 * test "$(date -u +\%F)" = 2026-09-14 && /usr/bin/env EQUITY_SCANNER_PARITY_DATE=2026-09-14 /opt/equity-scanner/tools/prepare_parity_input.sh >> /opt/equity-scanner/reports/parity-coordinator.log 2>&1
+55 12 14 9 * test "$(date -u +\%F)" = 2026-09-14 && /usr/bin/env EQUITY_SCANNER_PARITY_DATE=2026-09-14 /opt/equity-scanner/tools/capture_parity_gateway_health.sh before >> /opt/equity-scanner/reports/parity-coordinator.log 2>&1
+10 13 14 9 * test "$(date -u +\%F)" = 2026-09-14 && /usr/bin/env EQUITY_SCANNER_PARITY_DATE=2026-09-14 /opt/equity-scanner/tools/run_parity_scan.sh >> /opt/equity-scanner/reports/parity-coordinator.log 2>&1
+45 13 14 9 * test "$(date -u +\%F)" = 2026-09-14 && /usr/bin/env EQUITY_SCANNER_PARITY_DATE=2026-09-14 /opt/equity-scanner/tools/compare_parity_scan.sh >> /opt/equity-scanner/reports/parity-coordinator.log 2>&1
+50 13 14 9 * test "$(date -u +\%F)" = 2026-09-14 && /usr/bin/env EQUITY_SCANNER_PARITY_DATE=2026-09-14 /opt/equity-scanner/tools/capture_parity_gateway_health.sh after >> /opt/equity-scanner/reports/parity-coordinator.log 2>&1

@@ -80,6 +80,7 @@ class EquityScanSettings(BaseModel):
     limits: EquityScanLimits = Field(default_factory=EquityScanLimits)
     news: EquityNewsSettings = Field(default_factory=EquityNewsSettings)
     batch_size: int = 100
+    quote_fetch_concurrency: int = Field(default=4, ge=1, le=4)
     rvol_lookback_days: int = 20
     rvol_fetch_concurrency: int = 4
     group_by_sector: bool = True

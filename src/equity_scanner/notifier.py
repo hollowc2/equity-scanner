@@ -59,9 +59,11 @@ class DiscordNotifier:
                     )
                 async with request as resp:
                     if resp.status not in (200, 204):
-                        log.warning("discord_post_failed status=%s", resp.status)
+                        log.error("discord_post_failed status=%s", resp.status)
+                        raise RuntimeError("Discord rejected notification")
         except Exception as exc:
-            log.error("discord_error error=%s", exc)
+            log.error("discord_error error_type=%s", type(exc).__name__)
+            raise RuntimeError("Discord notification failed") from None
 
     async def notify_messages(self, messages: list[str]) -> None:
         """Post one or more plain-text messages (e.g. morning equity scan)."""

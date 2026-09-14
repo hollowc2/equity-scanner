@@ -142,7 +142,7 @@ async def run_scan(
         quote_collection = await provider.get_equity_quote_collection(
             symbols,
             batch_size=scan_config.batch_size,
-            concurrency=1 if paced else 4,
+            concurrency=1 if paced else scan_config.quote_fetch_concurrency,
             mode=quote_coverage_mode,
             # A gateway outage is usually transient; this app has no hard deadline
             # of its own beyond finishing before the downstream alert send, so it
@@ -368,7 +368,7 @@ async def run_scan(
             raise RuntimeError(
                 "EQUITY_SCANNER_DISCORD_WEBHOOK_URL not configured in .env or environment"
             )
-        notifier = DiscordNotifier(app_settings.discord_webhook_url)
+        notifier = DiscordNotifier(app_settings.discord_webhook_url.get_secret_value())
         await notifier.notify_messages(messages)
         return messages
 

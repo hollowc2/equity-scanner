@@ -21,6 +21,18 @@ def make_settings() -> AppSettings:
     )
 
 
+def test_gateway_identity_and_priority_are_fixed_server_side_expectations(monkeypatch):
+    monkeypatch.setenv("SCHWAB_GATEWAY_CLIENT_IDENTITY", "impersonated")
+    monkeypatch.setenv("SCHWAB_GATEWAY_PRIORITY", "protected")
+    monkeypatch.setenv("GATEWAY_CLIENT_IDENTITY", "impersonated")
+    monkeypatch.setenv("GATEWAY_PRIORITY", "protected")
+
+    settings = make_settings()
+
+    assert settings.gateway_client_identity == "equity-scanner"
+    assert settings.gateway_priority == "background"
+
+
 def _bar(day: dt.date, close: float, volume: int) -> dict:
     return {
         "timestamp": dt.datetime.combine(day, dt.time(16, 0), tzinfo=dt.timezone.utc).isoformat(),

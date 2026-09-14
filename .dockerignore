@@ -1,11 +1,12 @@
-.git
-.agents
-.codex
-.venv
-.pytest_cache
-.ruff_cache
-reports
-data
-tests
-.env*
-__pycache__
+# Only application build inputs may enter the Docker context.
+**
+!Dockerfile
+!pyproject.toml
+!uv.lock
+!README.md
+!src/
+!src/**
+!configs/
+!configs/**
+**/__pycache__
+**/*.pyc

@@ -1,4 +1,4 @@
-name: equity_scanner_candidate
+name: equity_scanner_production
 
 services:
   scan:
@@ -6,8 +6,10 @@ services:
     pull_policy: never
     env_file:
       - "${EQUITY_SCANNER_SECRET_ENV:?set scanner-owned secret env path}"
-    user: "${EQUITY_SCANNER_UID:-1000}:${EQUITY_SCANNER_GID:-1000}"
-    command: ["--dry-run", "--scan-config", "/app/configs/equity_scan.yaml"]
+    environment:
+      SCHWAB_GATEWAY_TIMEOUT_SECONDS: "15"
+    user: "${EQUITY_SCANNER_UID:-1001}:${EQUITY_SCANNER_GID:-1001}"
+    command: ["--scan-config", "/app/configs/equity_scan.production.yaml"]
     volumes:
       - "./configs:/app/configs:ro"
       - "./data:/app/data:ro"
@@ -24,12 +26,14 @@ services:
     pull_policy: never
     env_file:
       - "${EQUITY_SCANNER_SECRET_ENV:?set scanner-owned secret env path}"
-    user: "${EQUITY_SCANNER_UID:-1000}:${EQUITY_SCANNER_GID:-1000}"
+    environment:
+      SCHWAB_GATEWAY_TIMEOUT_SECONDS: "15"
+    user: "${EQUITY_SCANNER_UID:-1001}:${EQUITY_SCANNER_GID:-1001}"
     entrypoint: ["/app/.venv/bin/equity-scanner-refresh-universes"]
-    command: ["--dry-run", "--scan-config", "/app/configs/equity_scan.yaml"]
+    command: ["--scan-config", "/app/configs/equity_scan.production.yaml"]
     volumes:
       - "./configs:/app/configs:ro"
-      - "./data:/app/data:ro"
+      - "./data:/app/data:rw"
       - "./reports:/app/reports:rw"
     network_mode: host
     read_only: true
