@@ -4,116 +4,18 @@
 
 # equity-scanner
 
-**Read-only market-data scanner**: premarket and opening movers across the S&P 500,
+Read-only market-data scanner: premarket and opening movers across the S&P 500,
 Nasdaq-100, a liquidity-filtered universe, and a custom watchlist, with news
-enrichment and Discord reporting — gateway-backed and standalone, with no runtime
-dependency on ButterflyGuy.
+enrichment and Discord reporting. Standalone — no runtime dependency on
+ButterflyGuy — backed by [SchwabGateway](https://github.com/hollowc2/SchwabGateway)'s
+read-only HTTP API.
 
-This project migrates ButterflyGuy's embedded equity scanner
-(`Butterflyguy/src/butterfly_guy/equity_scan/`) off a direct `SchwabClientWrapper`
-onto [SchwabGateway](https://github.com/hollowc2/SchwabGateway)'s read-only HTTP API.
-Deployment is a separate, explicitly gated checkpoint (see
-[Deployment](#deployment)) — nothing here installs schedules, contacts Discord, or
-touches credentials automatically.
+One CLI run does the whole morning scan: fetch the universe, pull gateway quotes
+and daily history, rank snapshots, enrich with news, and post a Discord report
+with dated markdown/JSON archives. The scanner never writes market data or talks
+to Schwab directly, and `--dry-run` disables every external action.
 
-## Overview
-
-A single CLI runs the whole morning scan end to end: fetch the universe, pull
-gateway quotes and daily history, rank snapshots, enrich with news, and post a
-Discord-formatted report with dated markdown/JSON archives. Data flows one way only —
-the scanner carries no account, order, or position data and never talks to Schwab
-directly; every gateway interaction goes through the pinned SchwabGateway SDK.
-
-Key properties:
-
-- **Read-only**: the scan never writes market data; the refresh job rewrites only
-  its own universe files, atomically.
-- **Fail-closed**: secrets are required and validated, quote batches fail closed,
-  and `--dry-run` disables every external action (news fetches, Discord, universe
-  writes).
-- **Standalone**: no ButterflyGuy runtime code or config is used at any layer.
-
-## Features
-
-- **Universes** — S&P 500 (GitHub CSV), Nasdaq-100 (Wikipedia), NASDAQ+NYSE listed
-  symbols (nasdaqtrader.com), plus a liquidity-filtered universe and a custom
-  watchlist. Refresh replaces files atomically, rejects implausibly small upstream
-  results, and writes nothing under `--dry-run`. Listing rights (e.g. `AIIA.R`) and
-  NYSE CQS warrant designators (e.g. `NE.WS.A`) are excluded while real class shares
-  like `BRK.A` are preserved.
-- **Gateway-backed quotes** — `QuoteV1` batches at the gateway's 100-symbol cap,
-  fail-closed by default, with `parity-bounded-recovery` and
-  `parity-paced-recovery` modes for auditable sequential-skew-aware parity proofs.
-- **Ranking** — filtered prior-day and premarket gainers/losers, RVOL, opening
-  focus, catalyst watch, mover buckets, and sector grouping.
-- **News enrichment** — SEC EDGAR full-text search and company facts plus Alpha
-  Vantage news/earnings, keyed by ticker, with bounded concurrency and rate-spaced
-  SEC requests.
-- **Discord reporting** — report text split into message-sized (2000-char) chunks,
-  with numbered/dated markdown and JSON archives recording per-phase timings.
-
-## Components
-
-- `gateway.py` — factory for `schwab_gateway_sdk.GatewayMarketDataClient`.
-- `provider.py` — `GatewayEquityDataProvider`: adapts the gateway's
-  `get_history`/`get_movers`/`get_quotes` to the shapes ButterflyGuy's
-  `volume.py`/`scanner.py`/`universes.py` expect (candle dicts, mover dicts, and a
-  `symbol -> QuoteV1` map, batched at the gateway's 100-symbols-per-request cap).
-  Daily-history requests are coalesced and cached for one provider/run so the RVOL
-  and prior-day phases do not refetch the same symbol/window.
-  Quote batches normally remain fail-closed. The explicit
-  `parity-bounded-recovery` coverage mode settles every initial batch, retains
-  successful results, and makes one delayed sequential recovery call only when
-  exactly one batch has a transient gateway failure. It never retries multiple
-  failed batches. The separately named `parity-paced-recovery` mode serializes
-  initial quote batches with a 250ms inter-batch delay, then makes one delayed,
-  sequential recovery call per transient failed batch when at most three batches
-  failed. This caps a 1,917-symbol universe at 20 initial plus three recovery calls.
-- `volume.py` — ported `fetch_avg_volumes`/`fetch_prior_day_changes` and their pure
-  helpers (`avg_daily_volume`, `prior_session_pct_change`, `compute_rvol`,
-  `symbols_needing_rvol_fetch`).
-- `scanner.py` — ported `equity_scan/scanner.py`: `EquitySnapshot`,
-  `parse_equity_quote`, `build_snapshots`, `rank_scan_results`,
-  `attach_news_impacts`, `rank_catalyst_watch`, ... **Quote parsing is rewritten, not
-  a mechanical port** — see the module docstring for why: SchwabGateway's
-  `/v1/quotes` returns a flat, already session-resolved `QuoteV1` per symbol (the
-  gateway itself now picks the fresher of Schwab's regular/extended sessions
-  server-side), not ButterflyGuy's raw two-session `{"quote", "extended"}` payload.
-  Two real behavior changes fall out of that, documented on `parse_equity_quote`.
-- `universes.py` — ported `equity_scan/universes.py`: S&P 500 (GitHub CSV) /
-  Nasdaq-100 (header-identified Wikipedia table) / NASDAQ+NYSE listed-symbol
-  (nasdaqtrader.com) fetchers, local universe file I/O, and the liquid-universe
-  price/volume filters (adapted for `QuoteV1`). equity-scanner refreshes its own
-  universe files rather than reading ButterflyGuy's — see the module docstring for
-  why.
-- `news.py` — ported `equity_scan/news.py`: SEC EDGAR full-text search +
-  company-facts, and Alpha Vantage news/earnings, keyed by ticker. Zero
-  Schwab/gateway dependency. Per-provider concurrency is bounded; SEC request starts
-  remain rate-spaced through `sec_request_interval_seconds`.
-- `report.py` — ported `equity_scan/report.py`: formats `ScanResults` into
-  Discord-message-sized (2000-char) chunks, plus dated markdown/JSON archiving.
-- `notifier.py` — **narrow** port of `services/notifier.py`'s `DiscordNotifier`:
-  only `_post`/`notify_messages`. The rest of that class is coupled to
-  butterfly-options-trade notifications and doesn't apply here. Delivery failures
-  (non-2xx or transport errors) propagate as `RuntimeError` and never log the
-  webhook URL.
-- `run.py` — CLI orchestration (`equity-scanner-run`), ported from
-  `scripts/run_morning_scan.py`: universes -> quotes -> volume -> snapshots ->
-  ranking -> news -> report -> archive -> Discord. Every material phase logs elapsed
-  milliseconds, and generation timings are persisted in the JSON archive under
-  `phase_timings_ms`.
-- `refresh_universes.py` — CLI (`equity-scanner-refresh-universes`), ported from
-  `scripts/refresh_equity_universes.py`: refreshes `sp500.txt`/`nq100.txt`/
-  `sectors.json`/`liquid.txt`/`liquid_meta.json`.
-- `scan_config.py` — settings (filters/limits/universes/news/report), YAML-loadable
-  via `load_equity_scan_config`.
-- `config.py` — `AppSettings`: gateway credentials (required, fail-closed) plus
-  `SEC_USER_AGENT`/`ALPHA_VANTAGE_API_KEY`/`EQUITY_SCANNER_DISCORD_WEBHOOK_URL`
-  (all optional — news providers and Discord posting degrade gracefully when unset;
-  see `.env.example`).
-- `time_utils.py` — market-hours helpers.
-
-## Running it
+## Quick start
 
 ```
 uv run equity-scanner-refresh-universes   # first run: populate data/universes/
@@ -121,83 +23,23 @@ uv run equity-scanner-run --dry-run       # print the report instead of posting
 uv run equity-scanner-run --open-scan     # include after-open Schwab mover buckets
 ```
 
-Both accept `--scan-config path/to/equity_scan.yaml`; unset fields fall back to
-`scan_config.py`'s defaults. See `.env.example` for the required/optional secrets.
-The checked-in config is `configs/equity_scan.yaml`; all external actions are disabled
-by using `--dry-run`.
-
-Parity runs additionally pass
-`--quote-coverage-mode parity-paced-recovery`. Their JSON report records requested,
-returned, stale-retained, and unavailable symbols; failed batch IDs, symbols, and
-typed errors; initial/recovery call counts and limits; pacing delays; and maximum
-quote concurrency. Coverage must be exactly 100% for either strict or
-`sequential-skew-aware` comparison to pass. If a recovery call fails, a non-transient
-batch fails, or more than three initial batches fail, the scanner still writes the
-partial evidence with `scanned_symbols` equal to the number of returned universe
-symbols, and the comparator fails with `incomplete_quote_coverage`.
-
-The skew-aware gate treats membership in all four ranked sections as capture-time
-evidence because every section is built only after current price, volume, reference-
-price, and premarket-RVOL filters run. For the nominally prior-day sections, it still
-gates the prior-day values, gain-versus-loss section assignment, and relative ordering
-of symbols present in both captures. Exact prior-section membership remains gated in
-strict mode. Stale-retained quote counts and symbols remain visible in coverage
-evidence and do not relax the requirement for complete quote coverage.
+Both accept `--scan-config path/to/equity_scan.yaml`. See `.env.example` for
+required/optional secrets.
 
 ## Testing
-
-Tests run against fakes (`httpx.MockTransport` for the gateway HTTP layer,
-recorded-fixture responses via a monkeypatched `urllib.request.urlopen` for the
-universe network fetchers, patched `_post` for the Discord notifier) — no live
-Schwab credentials, no running gateway, no live network calls.
-
-The deterministic cross-repository parity tests cover universe loading, quote-driven
-filtering/ranking, RVOL and prior-session calculations, news enrichment, opening and
-catalyst ranking, mover sections, Discord chunking, and Markdown/JSON archives. The
-strict report comparator gates every ranked and mover section plus news payloads. The
-same-session comparator separately records capture-sensitive differences caused by
-sequential quote collection.
 
 ```
 uv run pytest
 uv run ruff check .
 ```
 
+Tests run entirely against fakes (mocked gateway HTTP, recorded universe fixtures,
+patched Discord notifier) — no live credentials or network calls needed.
+
 ## Deployment
 
-<p align="center">
-  <img src="logo-2x1.jpg" alt="EquityScanner sector survey banner" width="720">
-</p>
-
-Deployment and schedule migration require separate approval. The current candidate
-gateway is never modified by this project. See `docs/dependency-map.md` for the
-extraction boundary and documented behavior differences, and
-`docs/deployment-runbook.md` for the candidate, parity, schedule, and rollback gates.
-
-`compose.candidate.yml` is a dry-run-only, one-shot candidate definition. It requires
-an immutable `EQUITY_SCANNER_IMAGE` and an external scanner-owned secret env file.
-The scheduled wrapper targets the production read-only gateway at `127.0.0.1:8011`
-by default; `EQUITY_SCANNER_GATEWAY_URL` can override that non-secret endpoint.
-`infra/equity_scanner_candidate.cron` and
-`infra/equity_scanner_universe_refresh_candidate.cron` remain uninstalled until
-same-session parity. Both candidate services are dry-run-only; the refresh service
-also mounts universe data read-only.
-
-### Production schedules
-
-`compose.production.yml` provides one-shot production jobs with a read-only root
-filesystem. The scan reads `data/universes`; only the refresh job can write there.
-`configs/equity_scan.production.yaml` serializes gateway quote and history requests,
-and both production cron wrappers share a lock to prevent overlapping jobs.
-The image is pinned through `/opt/equity-scanner/.production-image`.
-
-The scan's host launcher reads only the equity Discord destination and optional news
-settings from an external env file, defaulting to `/opt/butterflyguy/.env`. It maps
-`EQUITY_DISCORD_WEBHOOK_URL` to the standalone scanner's environment name in memory.
-It does not use ButterflyGuy runtime code or change the external file. Override
-`EQUITY_SCANNER_NOTIFICATION_ENV` to reference a separately provisioned notification
-file. Gateway credentials remain in `/opt/equity-scanner/secrets/gateway.env`.
-
-`infra/equity_scanner_production.cron` schedules the scan at 06:00 Pacific on weekdays
-and universe refresh at 20:00 Pacific on Sunday. Install only after the deployment
-runbook's validation and rollback preparation; never run both old and new owners.
+Deployment and schedule migration require separate approval and are gated
+behind their own runbook — see [`docs/deployment-runbook.md`](docs/deployment-runbook.md)
+for the candidate/parity/schedule/rollback process and
+[`docs/dependency-map.md`](docs/dependency-map.md) for the ButterflyGuy extraction
+boundary and behavior differences.
