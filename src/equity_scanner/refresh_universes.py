@@ -10,6 +10,8 @@ import asyncio
 import logging
 from pathlib import Path
 
+from schwab_gateway_sdk import QuoteV1
+
 from equity_scanner.config import AppSettings
 from equity_scanner.gateway import build_gateway_client
 from equity_scanner.provider import GatewayEquityDataProvider
@@ -26,6 +28,75 @@ from equity_scanner.universes import (
 from equity_scanner.volume import fetch_avg_volumes
 
 log = logging.getLogger("equity_scanner.refresh_universes")
+
+# Above this share of failed seed batches the gateway itself is unhealthy, not a symbol,
+# so the refresh aborts and leaves the previous universe files in place.
+MAX_FAILED_SEED_BATCH_FRACTION = 0.1
+# Upper bound on symbols isolated as unquotable before the refresh gives up.
+MAX_UNQUOTABLE_SEED_SYMBOLS = 10
+
+
+async def _isolate_failed_batch(
+    provider: GatewayEquityDataProvider,
+    symbols: list[str],
+    quotes: dict[str, QuoteV1],
+    unquotable: list[str],
+) -> None:
+    """Split a failing batch in halves until each failure is a single symbol."""
+    if len(symbols) == 1:
+        unquotable.append(symbols[0])
+        log.warning("liquid_universe_seed_symbol_unquotable symbol=%s", symbols[0])
+        if len(unquotable) > MAX_UNQUOTABLE_SEED_SYMBOLS:
+            raise RuntimeError(
+                f"Refusing to refresh liquid universe: more than "
+                f"{MAX_UNQUOTABLE_SEED_SYMBOLS} seed symbols failed to quote"
+            )
+        return
+    middle = len(symbols) // 2
+    for half in (symbols[:middle], symbols[middle:]):
+        try:
+            quotes.update(await provider.get_equity_quotes(half, batch_size=len(half)))
+        except Exception:
+            await _isolate_failed_batch(provider, half, quotes, unquotable)
+
+
+async def fetch_seed_quotes(
+    provider: GatewayEquityDataProvider,
+    symbols: list[str],
+    *,
+    batch_size: int,
+    concurrency: int,
+) -> tuple[dict[str, QuoteV1], list[str]]:
+    """Quote the seed universe without letting one rejected symbol abort the refresh.
+
+    A batch that still fails after the provider's retries is bisected so only the
+    symbol(s) the upstream rejects are dropped. Returns (quotes, unquotable symbols).
+    """
+    try:
+        quotes = await provider.get_equity_quotes(
+            symbols, batch_size=batch_size, concurrency=concurrency
+        )
+        return quotes, []
+    except Exception as exc:
+        collection = getattr(exc, "quote_collection", None)
+        if collection is None:
+            raise
+        coverage = collection.coverage
+        allowed = max(1, int(coverage.initial_call_count * MAX_FAILED_SEED_BATCH_FRACTION))
+        if coverage.failed_batch_count > allowed:
+            raise
+
+    quotes = dict(collection.quotes)
+    unquotable: list[str] = []
+    for failure in coverage.failed_batches:
+        log.warning(
+            "liquid_universe_seed_batch_isolating batch_id=%d symbol_count=%d error_type=%s",
+            failure.batch_index,
+            len(failure.symbols),
+            failure.error_type,
+        )
+        await _isolate_failed_batch(provider, list(failure.symbols), quotes, unquotable)
+    return quotes, unquotable
 
 
 async def refresh_liquid_universe(
@@ -46,8 +117,8 @@ async def refresh_liquid_universe(
     seed_symbols = sorted(exchange_map)
     log.info("liquid_universe_seed_loaded symbols=%d", len(seed_symbols))
 
-    quotes = await provider.get_equity_quotes(
-        seed_symbols, batch_size=batch_size, concurrency=quote_fetch_concurrency
+    quotes, unquotable = await fetch_seed_quotes(
+        provider, seed_symbols, batch_size=batch_size, concurrency=quote_fetch_concurrency
     )
     price_passed, prices = filter_symbols_by_price(
         seed_symbols,
@@ -81,6 +152,7 @@ async def refresh_liquid_universe(
 
     counts = {
         "seed": len(seed_symbols),
+        "unquotable": len(unquotable),
         "post_price": len(price_passed),
         "liquid": len(final_symbols),
     }
@@ -179,6 +251,8 @@ def main() -> None:
         level=args.log_level,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
     counts = asyncio.run(
         run_refresh(

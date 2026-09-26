@@ -11,12 +11,15 @@ gateway_url=${EQUITY_SCANNER_GATEWAY_URL:-http://127.0.0.1:8011}
 [ "$(TZ=America/Los_Angeles date +%H:%M)" = "20:00" ] || exit 0
 [ -s "$image_file" ] || { echo "equity_scanner_missing_production_image"; exit 1; }
 
-export EQUITY_SCANNER_NOTIFICATION_ENV="${EQUITY_SCANNER_NOTIFICATION_ENV:-$scanner_root/secrets/notifications.env}"
+# Read only for the failure alert webhook; the refresh container gets no notification
+# settings.
+export EQUITY_SCANNER_NOTIFICATION_ENV="${EQUITY_SCANNER_NOTIFICATION_ENV:-/opt/butterflyguy/.env}"
 
 exec flock -n "$lock_file" sh -c '
   cd "$1"
   EQUITY_SCANNER_IMAGE="$(sed -n "1p" "$2")" \
   EQUITY_SCANNER_SECRET_ENV="$1/secrets/gateway.env" \
-  docker compose -f compose.production.yml run --rm \
-    -e SCHWAB_GATEWAY_URL="$3" refresh-universes
+  EQUITY_SCANNER_GATEWAY_URL="$3" \
+  EQUITY_SCANNER_SERVICE=refresh-universes \
+  python3 "$1/src/equity_scanner/production_job.py"
 ' sh "$scanner_root" "$image_file" "$gateway_url"

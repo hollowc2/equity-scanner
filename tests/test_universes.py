@@ -322,3 +322,31 @@ def test_nyse_cqs_symbol_identifies_warrants_disguised_as_class_shares():
         "BRK.A|Berkshire Class A|N|BRK.A|N|100|N|BRK.A\n"
     )
     assert universes.parse_nyse_listed_text(text) == ["NE", "BRK.A"]
+
+
+def test_listing_parsers_drop_spac_warrants_units_and_rights_but_keep_partnership_units():
+    nasdaq = (
+        "Symbol|Security Name|Market Category|Test Issue|Financial Status|Round Lot Size|ETF|"
+        "NextShares\n"
+        "AACI|Armada Acquisition Corp. III - Class A Ordinary Share|G|N|N|100|N|N\n"
+        "AACIU|Armada Acquisition Corp. III - Units|G|N|N|100|N|N\n"
+        "AACIW|Armada Acquisition Corp. III - Warrant|G|N|N|100|N|N\n"
+        "ASPCR|A SPAC III Acquisition Corp. - Right|S|N|D|100|N|N\n"
+        "ARLP|Alliance Resource Partners, L.P. - Common Units Representing Limited "
+        "Partnership Interests|Q|N|N|100|N|N\n"
+    )
+    other = (
+        "ACT Symbol|Security Name|Exchange|CQS Symbol|ETF|Round Lot Size|Test Issue|"
+        "NASDAQ Symbol\n"
+        "ET|Energy Transfer LP Common Units |N|ET|N|100|N|ET\n"
+        "MARPS|Marine Petroleum Trust - Units of Beneficial Interest|N|MARPS|N|100|N|MARPS\n"
+        "AMX|America Movil American Depositary Shares (each representing the right to "
+        "receive 20 Series B Shares)|N|AMX|N|100|N|AMX\n"
+        "BCAT.V|BlackRock Capital Allocation Term Trust Rights (expiring October 21, 2026) "
+        "Rights when issued|N|BCAT.V|N|100|N|BCAT=\n"
+        "ABCD.U|Example Acquisition Units, each consisting of one share|N|ABCD.U|N|100|N|"
+        "ABCD=\n"
+    )
+
+    assert universes.parse_nasdaq_listed_text(nasdaq) == ["AACI", "ARLP"]
+    assert universes.parse_nyse_listed_text(other) == ["ET", "MARPS", "AMX"]

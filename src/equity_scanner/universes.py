@@ -298,6 +298,23 @@ def _is_common_equity_symbol(symbol: str) -> bool:
     return True
 
 
+# Security-name suffixes nasdaqtrader uses for SPAC warrants/units/rights and exchange
+# rights offerings. Deliberately narrow: MLP "Common Units", trust "Units of Beneficial
+# Interest", and ADRs "representing the right to receive" are real common equity.
+_DERIVATIVE_SECURITY_NAME = re.compile(
+    r"\bwarrants?\b"
+    r"|-\s*(?:rights?|units?)\b(?!\s+of\b)"
+    r"|\brights?\s*\(expiring"
+    r"|\brights?\.?\s*$"
+    r"|\bunits?,?\s+each\s+consisting\b",
+    re.IGNORECASE,
+)
+
+
+def _is_derivative_security_name(name: str) -> bool:
+    return bool(_DERIVATIVE_SECURITY_NAME.search(name))
+
+
 def _parse_pipe_delimited_rows(text: str) -> list[list[str]]:
     rows: list[list[str]] = []
     for raw in text.splitlines():
@@ -321,7 +338,7 @@ def parse_nasdaq_listed_text(text: str) -> list[str]:
         etf = fields[6].strip().upper()
         if not symbol or test_issue == "Y" or etf == "Y":
             continue
-        if not _is_common_equity_symbol(symbol):
+        if not _is_common_equity_symbol(symbol) or _is_derivative_security_name(fields[1]):
             continue
         symbols.append(symbol)
     return symbols
@@ -341,8 +358,10 @@ def parse_nyse_listed_text(text: str) -> list[str]:
         test_issue = fields[6].strip().upper()
         if exchange != "N" or not symbol or test_issue == "Y" or etf == "Y":
             continue
-        if not _is_common_equity_symbol(symbol) or not _is_common_equity_symbol(
-            fields[3].strip().upper()
+        if (
+            not _is_common_equity_symbol(symbol)
+            or not _is_common_equity_symbol(fields[3].strip().upper())
+            or _is_derivative_security_name(fields[1])
         ):
             continue
         symbols.append(symbol)

@@ -67,6 +67,9 @@ class DiscordNotifier:
 
     async def notify_messages(self, messages: list[str]) -> None:
         """Post one or more plain-text messages (e.g. morning equity scan)."""
+        sent = 0
         for message in messages:
             if message.strip():
                 await self._post(message)
+                sent += 1
+        log.info("discord_messages_sent count=%d", sent)
