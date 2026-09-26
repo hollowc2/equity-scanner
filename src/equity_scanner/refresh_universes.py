@@ -17,11 +17,13 @@ from equity_scanner.gateway import build_gateway_client
 from equity_scanner.provider import GatewayEquityDataProvider
 from equity_scanner.scan_config import load_equity_scan_config
 from equity_scanner.universes import (
+    MIN_LIQUID_SYMBOLS,
     build_liquid_meta,
     fetch_exchange_seed_map,
     filter_symbols_by_avg_volume,
     filter_symbols_by_price,
     refresh_builtin_universes,
+    require_minimum_size,
     write_liquid_meta,
     write_universe_file,
 )
@@ -159,6 +161,10 @@ async def refresh_liquid_universe(
     if dry_run:
         return counts
 
+    # Average-volume fetches fail per symbol without raising (e.g. the gateway marks
+    # daily history stale before the latest session's bar is published), which would
+    # otherwise replace the universe with an empty or truncated one.
+    require_minimum_size("liquid", final_symbols, MIN_LIQUID_SYMBOLS)
     write_universe_file(base / "liquid.txt", final_symbols)
     meta = build_liquid_meta(
         final_symbols,
