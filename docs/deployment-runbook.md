@@ -24,6 +24,10 @@ notification automatically.
 
 ## Approval gate 1: deploy and run same-session parity
 
+> Completed September 2026. The parity scripts, crons, comparator, and quote recovery
+> modes named below were removed after cutover; recover them from git history if a
+> parity run is ever needed again.
+
 Required approval must explicitly cover candidate deployment, the scanner-owned
 background gateway credential, and the bounded parity schedule. It does not authorize
 production notification or replacing either existing schedule.

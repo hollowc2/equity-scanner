@@ -95,7 +95,6 @@ def test_archive_report_json_serializes_incomplete_quote_coverage(tmp_path):
     settings = EquityScanSettings()
     generated_at = _premarket_et()
     coverage = QuoteCoverage(
-        mode="parity-bounded-recovery",
         requested_count=2,
         returned_count=1,
         stale_retained_count=1,
@@ -111,11 +110,9 @@ def test_archive_report_json_serializes_incomplete_quote_coverage(tmp_path):
                 symbols=("MSFT",),
                 error_type="GatewayTimeoutError",
                 error_message="gateway quote upstream timed out",
-                recovery_attempted=True,
             ),
         ),
         initial_call_count=2,
-        recovery_call_count=1,
         max_concurrency=2,
         complete=False,
         verdict="incomplete",
