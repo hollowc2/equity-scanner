@@ -38,6 +38,7 @@ USER_AGENT = "equity-scanner/0.1"
 MIN_SP500_CONSTITUENTS = 450
 MIN_NQ100_CONSTITUENTS = 90
 MIN_SP500_SECTORS = 450
+MIN_LIQUID_SYMBOLS = 1000
 
 
 def _read_ticker_file(path: Path) -> list[str]:
@@ -248,7 +249,7 @@ def load_sector_map(universe_dir: str | Path) -> dict[str, str]:
     return sectors
 
 
-def _require_minimum_size(name: str, values: list[str] | dict[str, str], minimum: int) -> None:
+def require_minimum_size(name: str, values: list[str] | dict[str, str], minimum: int) -> None:
     if len(values) < minimum:
         raise RuntimeError(
             f"Refusing to replace {name}: fetched {len(values)} entries; "
@@ -266,9 +267,9 @@ def refresh_builtin_universes(
     sp500 = fetch_sp500_tickers()
     nq100 = fetch_nq100_tickers()
     sectors = fetch_sp500_sectors()
-    _require_minimum_size("sp500", sp500, MIN_SP500_CONSTITUENTS)
-    _require_minimum_size("nq100", nq100, MIN_NQ100_CONSTITUENTS)
-    _require_minimum_size("sp500 sectors", sectors, MIN_SP500_SECTORS)
+    require_minimum_size("sp500", sp500, MIN_SP500_CONSTITUENTS)
+    require_minimum_size("nq100", nq100, MIN_NQ100_CONSTITUENTS)
+    require_minimum_size("sp500 sectors", sectors, MIN_SP500_SECTORS)
     for ticker in nq100:
         if ticker not in sectors:
             sectors[ticker] = "Nasdaq-100"
