@@ -19,10 +19,13 @@ from equity_scanner.scan_config import EquityScanSettings
 from equity_scanner.scanner import build_snapshots, rank_scan_results
 
 SOURCE_ROOT = Path("/mnt/Repos/Trading/Butterflyguy/src")
+# ButterflyGuy removed its embedded scanner after cutover (79bbe50), so the checkout
+# alone is not enough; the reference package must still be present.
+REFERENCE_AVAILABLE = (SOURCE_ROOT / "butterfly_guy/equity_scan/__init__.py").exists()
 FIXTURE = Path(__file__).parent / "fixtures/parity_quotes.json"
 
 
-@pytest.mark.skipif(not SOURCE_ROOT.exists(), reason="ButterflyGuy reference checkout unavailable")
+@pytest.mark.skipif(not REFERENCE_AVAILABLE, reason="ButterflyGuy reference scanner unavailable")
 def test_filter_calculation_and_ranking_parity() -> None:
     sys.path.insert(0, str(SOURCE_ROOT))
     try:
