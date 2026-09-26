@@ -2,44 +2,55 @@
   <img src="logo.jpg" alt="EquityScanner — neon shield and candlestick mark" width="300">
 </p>
 
-# equity-scanner
+# EquityScanner
 
-Read-only market-data scanner: premarket and opening movers across the S&P 500,
-Nasdaq-100, a liquidity-filtered universe, and a custom watchlist, with news
-enrichment and Discord reporting. Standalone — no runtime dependency on
-ButterflyGuy — backed by [SchwabGateway](https://github.com/hollowc2/SchwabGateway)'s
-read-only HTTP API.
+EquityScanner finds the day's premarket and opening movers and posts a morning
+report to Discord.
 
-One CLI run does the whole morning scan: fetch the universe, pull gateway quotes
-and daily history, rank snapshots, enrich with news, and post a Discord report
-with dated markdown/JSON archives. The scanner never writes market data or talks
-to Schwab directly, and `--dry-run` disables every external action.
+It scans the S&P 500, the Nasdaq-100, a liquidity-filtered universe, and your own
+watchlist. It ranks the biggest movers, adds recent news and filings, and saves
+each report as dated Markdown and JSON.
 
-## Quick start
+EquityScanner only reads market data. It has no trading, account, or order code,
+and it gets all Schwab data through the read-only
+[SchwabGateway](https://github.com/hollowc2/SchwabGateway) API.
 
+## Setup
+
+1. Copy `.env.example` to `.env` and set your gateway URL and API key.
+2. Optional: add `SEC_USER_AGENT` and `ALPHA_VANTAGE_API_KEY` for news, and
+   `EQUITY_SCANNER_DISCORD_WEBHOOK_URL` to post reports.
+3. Build the symbol lists:
+
+   ```bash
+   uv run equity-scanner-refresh-universes
+   ```
+
+## Usage
+
+```bash
+uv run equity-scanner-run --dry-run      # print the report; post nothing
+uv run equity-scanner-run                # post the report to Discord
+uv run equity-scanner-run --open-scan    # add after-open movers
 ```
-uv run equity-scanner-refresh-universes   # first run: populate data/universes/
-uv run equity-scanner-run --dry-run       # print the report instead of posting
-uv run equity-scanner-run --open-scan     # include after-open Schwab mover buckets
-```
 
-Both accept `--scan-config path/to/equity_scan.yaml`. See `.env.example` for
-required/optional secrets.
+`--dry-run` turns off every external action. Use it while testing.
 
-## Testing
+Settings for universes, filters, report limits, and news are in
+`configs/equity_scan.yaml`. Use `--scan-config` to point to a different file. Add
+your own tickers to `configs/universes/custom.txt`, one per line.
 
-```
+## Development
+
+```bash
 uv run pytest
 uv run ruff check .
 ```
 
-Tests run entirely against fakes (mocked gateway HTTP, recorded universe fixtures,
-patched Discord notifier) — no live credentials or network calls needed.
+Tests use fakes only. They need no credentials or network access.
 
 ## Deployment
 
-Deployment and schedule migration require separate approval and are gated
-behind their own runbook — see [`docs/deployment-runbook.md`](docs/deployment-runbook.md)
-for the candidate/parity/schedule/rollback process and
-[`docs/dependency-map.md`](docs/dependency-map.md) for the ButterflyGuy extraction
-boundary and behavior differences.
+Deployment needs separate approval. See the
+[deployment runbook](docs/deployment-runbook.md) and the
+[dependency map](docs/dependency-map.md).
