@@ -6,6 +6,7 @@ price as valid data."""
 from __future__ import annotations
 
 import datetime as dt
+from zoneinfo import ZoneInfo
 
 from schwab_gateway_sdk import QuoteV1
 
@@ -22,9 +23,11 @@ def _quote(
     close: float | None = 90.0,
     volume: int | None = 1_000_000,
     net_percent_change: float | None = None,
+    event_timestamp: dt.datetime | None = None,
 ) -> QuoteV1:
     return QuoteV1(
         symbol="TEST",
+        event_timestamp=event_timestamp,
         gateway_received_at=dt.datetime.now(dt.timezone.utc),
         source="test",
         session=session,
@@ -52,16 +55,52 @@ def test_premarket_volume_is_zero_outside_the_premarket_window_even_with_extende
     assert snapshot.rvol is None
 
 
-def test_premarket_volume_counts_extended_volume_during_the_premarket_window():
-    quote = _quote(session="extended", volume=500_000)
+EASTERN = ZoneInfo("America/New_York")
+GENERATED_AT = dt.datetime(2026, 9, 28, 9, 0, tzinfo=EASTERN)
+
+
+def test_premarket_volume_counts_todays_trading_even_when_session_is_regular():
+    """Before the open Schwab stamps the regular block with premarket trades, so the
+    gateway reports session="regular"; the volume is still today's premarket volume."""
+    quote = _quote(
+        session="regular",
+        volume=500_000,
+        event_timestamp=GENERATED_AT - dt.timedelta(minutes=2),
+    )
 
     snapshot = parse_equity_quote(
-        "AAPL", quote, universes={"sp500"}, in_premarket=True, avg_volume_20d=1_000_000
+        "AAPL",
+        quote,
+        universes={"sp500"},
+        in_premarket=True,
+        generated_at=GENERATED_AT,
+        avg_volume_20d=1_000_000,
     )
 
     assert snapshot is not None
     assert snapshot.premarket_volume == 500_000
     assert snapshot.rvol == 0.5
+
+
+def test_yesterdays_after_hours_volume_is_not_premarket_volume():
+    quote = _quote(
+        session="extended",
+        volume=500_000,
+        event_timestamp=dt.datetime(2026, 9, 25, 19, 45, tzinfo=EASTERN),
+    )
+
+    snapshot = parse_equity_quote(
+        "AAPL",
+        quote,
+        universes={"sp500"},
+        in_premarket=True,
+        generated_at=GENERATED_AT,
+        avg_volume_20d=1_000_000,
+    )
+
+    assert snapshot is not None
+    assert snapshot.premarket_volume == 0
+    assert snapshot.rvol is None
 
 
 def test_price_choice_rejects_negative_last_and_falls_through_to_mark():

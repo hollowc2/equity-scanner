@@ -131,6 +131,7 @@ def _quote(
     last: float,
     net_percent_change: float,
     volume: int,
+    event_timestamp: dt.datetime | None = None,
 ) -> QuoteV1:
     """A flat, already session-resolved gateway quote — see scanner.py's module
     docstring on why this replaced ButterflyGuy's two-payload {"quote", "extended"}
@@ -139,6 +140,7 @@ def _quote(
     prior_day_pct stay distinct from session_gap_pct even when `session=="extended"`."""
     return QuoteV1(
         symbol="TEST",
+        event_timestamp=event_timestamp,
         gateway_received_at=dt.datetime(2026, 8, 19, tzinfo=dt.timezone.utc),
         source="test",
         session=session,
@@ -150,25 +152,49 @@ def _quote(
     )
 
 
+TRADED_PREMARKET = PREMARKET_AT - dt.timedelta(minutes=5)
+LAST_TRADED_YESTERDAY = dt.datetime(2026, 8, 18, 16, 0, tzinfo=EASTERN)
+
 QUOTES = {
-    # +8% premarket gap; volume alone (there's only one figure now, see scanner.py's
-    # module docstring) clears the 500k min_volume filter.
+    # +8% premarket gap on today's premarket volume, clearing min_rvol vs its 20d avg.
     "AAPL": _quote(
-        session="extended", close=100.0, last=108.0, net_percent_change=0.2, volume=600_000
+        session="extended",
+        close=100.0,
+        last=108.0,
+        net_percent_change=0.2,
+        volume=600_000,
+        event_timestamp=TRADED_PREMARKET,
     ),
-    # -6% premarket gap.
+    # -6% premarket gap. Before the open the gateway usually reports "regular" and
+    # Schwab's netPercentChange already includes premarket trades; the timestamp, not
+    # the session label, makes this today's premarket volume.
     "MSFT": _quote(
-        session="extended", close=200.0, last=188.0, net_percent_change=-0.5, volume=550_000
+        session="regular",
+        close=200.0,
+        last=188.0,
+        net_percent_change=-6.0,
+        volume=550_000,
+        event_timestamp=TRADED_PREMARKET,
     ),
-    # No extended-session data at all (session stayed "regular"): +0.2% is too small a
-    # gap regardless, and no premarket volume means no rvol fetch.
+    # Last traded yesterday: +0.2% is too small a gap regardless, and no premarket
+    # volume means no rvol fetch.
     "GOOG": _quote(
-        session="regular", close=150.0, last=150.3, net_percent_change=0.2, volume=520_000
+        session="regular",
+        close=150.0,
+        last=150.3,
+        net_percent_change=0.2,
+        volume=520_000,
+        event_timestamp=LAST_TRADED_YESTERDAY,
     ),
-    # Extended session won but with zero volume: fails min_volume (0 < 500k) and is
-    # excluded from the rvol fetch (needs volume > 0), both from the same figure.
+    # Extended session won but with zero volume and no 20d average known: fails
+    # min_volume (0 < 500k) and is excluded from the rvol fetch.
     "TSLA": _quote(
-        session="extended", close=50.0, last=53.0, net_percent_change=0.2, volume=0
+        session="extended",
+        close=50.0,
+        last=53.0,
+        net_percent_change=0.2,
+        volume=0,
+        event_timestamp=TRADED_PREMARKET,
     ),
 }
 
@@ -201,7 +227,9 @@ async def test_gateway_backed_scan_produces_sane_ranked_output(gateway_client) -
     provider = GatewayEquityDataProvider(gateway_client)
     settings = EquityScanSettings(include_movers=True)
 
-    rvol_symbols = symbols_needing_rvol_fetch(QUOTES, in_premarket=True)
+    rvol_symbols = symbols_needing_rvol_fetch(
+        QUOTES, in_premarket=True, generated_at=PREMARKET_AT
+    )
     # GOOG/TSLA excluded: no/irrelevant premarket volume signal
     assert rvol_symbols == ["AAPL", "MSFT"]
 
@@ -345,3 +373,92 @@ def test_prior_day_ranking_membership_depends_on_current_quote_volume() -> None:
 
 def _candle(volume: int) -> dict:
     return {"datetime": 0, "close": 100.0, "volume": volume}
+
+
+def test_liquidity_uses_20d_average_volume_not_premarket_volume() -> None:
+    """Before the open `volume` is only premarket volume; a liquid name with light
+    premarket trading must still pass a daily-size min_volume floor."""
+    settings = EquityScanSettings(filters={"min_volume": 500_000, "min_rvol": 0.05})
+    quote = _quote(
+        session="regular",
+        close=100.0,
+        last=100.2,
+        net_percent_change=0.2,
+        volume=40_000,
+        event_timestamp=TRADED_PREMARKET,
+    )
+
+    with_avg = build_snapshots(
+        {"CRCL": quote},
+        {"CRCL": {"liquid"}},
+        settings,
+        avg_volumes={"CRCL": 5_000_000.0},
+        in_premarket=True,
+        generated_at=PREMARKET_AT,
+    )
+    without_avg = build_snapshots(
+        {"CRCL": quote},
+        {"CRCL": {"liquid"}},
+        settings,
+        in_premarket=True,
+        generated_at=PREMARKET_AT,
+    )
+
+    assert [snapshot.symbol for snapshot in with_avg] == ["CRCL"]
+    assert without_avg == []  # unknown average falls back to the quote's own volume
+
+
+def test_min_rvol_limits_premarket_gap_lists_but_not_prior_day_sections() -> None:
+    settings = EquityScanSettings(filters={"min_rvol": 0.05})
+    quotes = {
+        # Rallied 8% yesterday, gapping +3% on light premarket volume (rvol 0.01).
+        "LIGHT": _quote(
+            session="regular",
+            close=100.0,
+            last=103.0,
+            net_percent_change=3.0,
+            volume=50_000,
+            event_timestamp=TRADED_PREMARKET,
+        ),
+        # Gapping +4% on heavy premarket volume (rvol 0.2).
+        "HEAVY": _quote(
+            session="regular",
+            close=50.0,
+            last=52.0,
+            net_percent_change=4.0,
+            volume=1_000_000,
+            event_timestamp=TRADED_PREMARKET,
+        ),
+        # +5% "gap" from yesterday's after-hours print with no trading today.
+        "AFTERHOURS": _quote(
+            session="extended",
+            close=20.0,
+            last=21.0,
+            net_percent_change=5.0,
+            volume=300_000,
+            event_timestamp=LAST_TRADED_YESTERDAY + dt.timedelta(hours=3),
+        ),
+    }
+    snapshots = build_snapshots(
+        quotes,
+        {symbol: {"liquid"} for symbol in quotes},
+        settings,
+        avg_volumes={"LIGHT": 5_000_000.0, "HEAVY": 5_000_000.0, "AFTERHOURS": 5_000_000.0},
+        prior_day_changes={"LIGHT": 8.0, "HEAVY": 0.5, "AFTERHOURS": 0.0},
+        in_premarket=True,
+        generated_at=PREMARKET_AT,
+    )
+
+    results = rank_scan_results(
+        snapshots,
+        settings=settings,
+        movers_up=[],
+        movers_down=[],
+        market_context=[],
+        scanned_symbols=len(quotes),
+        generated_at=PREMARKET_AT,
+    )
+
+    assert {snapshot.symbol for snapshot in snapshots} == {"LIGHT", "HEAVY", "AFTERHOURS"}
+    assert [snapshot.symbol for snapshot in results.prior_gainers] == ["LIGHT"]
+    assert [snapshot.symbol for snapshot in results.premarket_gainers] == ["HEAVY"]

@@ -285,3 +285,137 @@ async def test_mocked_twenty_batch_paced_parity_recovers_three_504s(
     assert payload["quote_coverage"]["initial_batch_delay_seconds"] == 0.25
     assert payload["quote_coverage"]["recovery_delay_seconds"] == 1.0
     assert sum(attempts.values()) == 23
+
+
+async def test_premarket_scan_finds_yesterdays_mover_from_stored_closes(monkeypatch, tmp_path):
+    """A stock that rallied yesterday but is flat premarket has netPercentChange ~0
+    before the open; the stored morning closes must still rank it as a prior gainer,
+    and liquid_meta must supply its 20d average volume without a history request."""
+    generated_at = dt.datetime(2026, 9, 28, 9, 0, tzinfo=EASTERN)  # Monday
+    traded_at = (generated_at - dt.timedelta(minutes=10)).astimezone(dt.timezone.utc)
+    yesterday = dt.datetime(2026, 9, 25, 16, 0, tzinfo=EASTERN).astimezone(dt.timezone.utc)
+    closes_dir = tmp_path / "closes"
+    closes_dir.mkdir()
+    # Captured Friday morning: Thursday's closes.
+    (closes_dir / "2026-09-25.json").write_text(
+        json.dumps({"date": "2026-09-25", "closes": {"FLAT": 100.0, "QUIET": 50.0}})
+    )
+    (tmp_path / "liquid_meta.json").write_text(
+        json.dumps({"FLAT": {"price": 100.0, "avg_volume_20d": 2_000_000, "exchange": "NYSE"}})
+    )
+    quotes = {
+        # Closed Friday at 108 (+8%), trading flat premarket on light volume.
+        "FLAT": QuoteV1(
+            symbol="FLAT",
+            event_timestamp=traded_at,
+            gateway_received_at=traded_at,
+            source="test",
+            session="regular",
+            last=108.1,
+            close=108.0,
+            net_percent_change=0.09,
+            volume=20_000,
+            stale=False,
+        ),
+        # No liquid_meta entry and no trading today, but on the custom watchlist.
+        "QUIET": QuoteV1(
+            symbol="QUIET",
+            event_timestamp=yesterday,
+            gateway_received_at=traded_at,
+            source="test",
+            session="regular",
+            last=50.0,
+            close=50.0,
+            net_percent_change=0.0,
+            volume=600_000,
+            stale=True,
+        ),
+    }
+    history_requests: list[str] = []
+
+    class FakeAppSettings:
+        sec_user_agent = None
+        alpha_vantage_api_key = None
+        gateway_max_attempts = 1
+        gateway_retry_backoff_seconds = 0.0
+        discord_webhook_url = None
+
+    class FakeGateway:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class FakeProvider:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def get_equity_quotes(self, symbols, *, batch_size=100):
+            return {symbol: quotes[symbol] for symbol in symbols}
+
+        async def get_equity_quote_collection(self, symbols, **_kwargs):
+            ordered = tuple(dict.fromkeys(symbols))
+            return QuoteCollection(
+                quotes=await self.get_equity_quotes(symbols),
+                coverage=QuoteCoverage(
+                    mode="strict",
+                    requested_count=len(ordered),
+                    returned_count=len(ordered),
+                    stale_retained_count=0,
+                    unavailable_count=0,
+                    failed_batch_count=0,
+                    requested_symbols=ordered,
+                    returned_symbols=ordered,
+                    stale_retained_symbols=(),
+                    unavailable_symbols=(),
+                    failed_batches=(),
+                    initial_call_count=1,
+                    recovery_call_count=0,
+                    max_concurrency=1,
+                    complete=True,
+                    verdict="complete",
+                ),
+            )
+
+        async def get_daily_bars(self, symbol, days_back=None):
+            history_requests.append(symbol)
+            return []
+
+    settings = EquityScanSettings(
+        universes=["liquid", "custom"],
+        universe_dir=str(tmp_path),
+        custom_watchlist=str(tmp_path / "custom.txt"),
+        report_dir=str(tmp_path / "reports"),
+        closes_dir=str(closes_dir),
+        context_symbols=[],
+        filters={"min_rvol": 0.05, "min_volume": 500_000},
+        news={"enabled": False},
+    )
+    monkeypatch.setattr(run, "now_eastern", lambda: generated_at)
+    monkeypatch.setattr(run, "AppSettings", FakeAppSettings)
+    monkeypatch.setattr(run, "load_equity_scan_config", lambda _path: settings)
+    monkeypatch.setattr(
+        run,
+        "load_universes",
+        lambda *_args, **_kwargs: {"liquid": ["FLAT"], "custom": ["QUIET"]},
+    )
+    monkeypatch.setattr(run, "build_gateway_client", lambda _settings: FakeGateway())
+    monkeypatch.setattr(run, "GatewayEquityDataProvider", FakeProvider)
+
+    await run.run_scan(scan_config_path="unused.yaml", dry_run=True)
+
+    payload = json.loads((tmp_path / "reports" / "2026-09-28.json").read_text())
+    [gainer] = payload["prior_gainers"]
+    assert gainer["symbol"] == "FLAT"
+    assert gainer["prior_day_pct"] == pytest.approx(8.0)
+    assert gainer["avg_volume_20d"] == 2_000_000
+    assert gainer["premarket_volume"] == 20_000
+    assert payload["premarket_gainers"] == []  # flat premarket, below min_rvol anyway
+    assert payload["matched_symbols"] == 2
+    # QUIET's average comes from history (custom, no liquid_meta); FLAT's history is only the
+    # prior-day confirmation for a ranked candidate. (The real provider coalesces a
+    # symbol's repeat daily-bars requests within a run; this fake does not.)
+    assert set(history_requests) == {"FLAT", "QUIET"}
+    today_closes = json.loads((closes_dir / "2026-09-28.json").read_text())
+    assert today_closes["closes"] == {"FLAT": 108.0, "QUIET": 50.0}
