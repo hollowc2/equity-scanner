@@ -26,7 +26,7 @@ from equity_scanner.config import AppSettings
 from equity_scanner.gateway import build_gateway_client
 from equity_scanner.news import fetch_news_impacts
 from equity_scanner.notifier import DiscordNotifier
-from equity_scanner.provider import GatewayEquityDataProvider, QuoteCoverageMode
+from equity_scanner.provider import GatewayEquityDataProvider
 from equity_scanner.report import archive_report, archive_report_json, build_report
 from equity_scanner.scan_config import load_equity_scan_config
 from equity_scanner.scanner import (
@@ -93,10 +93,7 @@ async def run_scan(
     scan_config_path: str = "configs/equity_scan.yaml",
     dry_run: bool = False,
     open_scan: bool = False,
-    quote_coverage_mode: QuoteCoverageMode = "strict",
 ) -> list[str]:
-    if quote_coverage_mode != "strict" and not dry_run:
-        raise ValueError(f"{quote_coverage_mode} quote coverage requires --dry-run")
     generated_at = now_eastern()
     if not is_trading_day(generated_at.date()):
         log.info("equity_scan_skipped reason=not_trading_day date=%s", generated_at.date())
@@ -143,17 +140,10 @@ async def run_scan(
             len(symbols),
         )
         phase_started = time.perf_counter()
-        paced = quote_coverage_mode == "parity-paced-recovery"
         quote_collection = await provider.get_equity_quote_collection(
             symbols,
             batch_size=scan_config.batch_size,
-            concurrency=1 if paced else scan_config.quote_fetch_concurrency,
-            mode=quote_coverage_mode,
-            # A gateway outage is usually transient; this app has no hard deadline
-            # of its own beyond finishing before the downstream alert send, so it
-            # is worth waiting out a few backed-off retries per failed batch
-            # rather than giving up after one.
-            max_recovery_attempts=4 if paced else 1,
+            concurrency=scan_config.quote_fetch_concurrency,
         )
         quotes = quote_collection.quotes
         quote_coverage = asdict(quote_collection.coverage)
@@ -445,12 +435,6 @@ def main() -> None:
         action="store_true",
         help="Include after-open Schwab mover buckets and Opening Focus context",
     )
-    parser.add_argument(
-        "--quote-coverage-mode",
-        choices=("strict", "parity-bounded-recovery", "parity-paced-recovery"),
-        default="strict",
-        help="Quote-batch failure policy; recovery modes are for auditable parity proofs",
-    )
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
 
@@ -466,7 +450,6 @@ def main() -> None:
             scan_config_path=args.scan_config,
             dry_run=args.dry_run,
             open_scan=args.open_scan,
-            quote_coverage_mode=args.quote_coverage_mode,
         )
     )
 

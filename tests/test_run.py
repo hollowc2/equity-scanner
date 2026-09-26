@@ -35,14 +35,6 @@ async def test_run_scan_skips_market_holiday_before_gateway(monkeypatch):
     assert messages == []
 
 
-@pytest.mark.parametrize(
-    "mode", ("parity-bounded-recovery", "parity-paced-recovery")
-)
-async def test_parity_quote_recovery_mode_requires_dry_run(mode):
-    with pytest.raises(ValueError, match="requires --dry-run"):
-        await run.run_scan(quote_coverage_mode=mode)
-
-
 @pytest.mark.parametrize("dry_run", [True, False])
 async def test_run_scan_persists_phase_timings_with_fake_boundaries(
     monkeypatch, tmp_path, dry_run
@@ -91,15 +83,12 @@ async def test_run_scan_persists_phase_timings_with_fake_boundaries(
             *,
             batch_size=100,
             concurrency=4,
-            mode="strict",
-            max_recovery_attempts=1,
         ):
             quotes = await self.get_equity_quotes(symbols, batch_size=batch_size)
             ordered = tuple(dict.fromkeys(symbols))
             return QuoteCollection(
                 quotes=quotes,
                 coverage=QuoteCoverage(
-                    mode=mode,
                     requested_count=len(ordered),
                     returned_count=len(ordered),
                     stale_retained_count=0,
@@ -111,7 +100,6 @@ async def test_run_scan_persists_phase_timings_with_fake_boundaries(
                     unavailable_symbols=(),
                     failed_batches=(),
                     initial_call_count=1,
-                    recovery_call_count=0,
                     max_concurrency=1,
                     complete=True,
                     verdict="complete",
@@ -189,7 +177,7 @@ async def test_run_scan_persists_phase_timings_with_fake_boundaries(
     assert all(value >= 0 for value in timings.values())
 
 
-async def test_mocked_twenty_batch_paced_parity_recovers_three_504s(
+async def test_mocked_twenty_batch_scan_archives_complete_coverage(
     monkeypatch, tmp_path
 ):
     generated_at = dt.datetime(2026, 9, 1, 8, 0, tzinfo=EASTERN)
@@ -201,8 +189,6 @@ async def test_mocked_twenty_batch_paced_parity_recovers_three_504s(
         symbols = request.url.params["symbols"].split(",")
         batch = symbols[0]
         attempts[batch] = attempts.get(batch, 0) + 1
-        if batch in {"S0300", "S0900", "S1500"} and attempts[batch] == 1:
-            return httpx.Response(504)
         return httpx.Response(
             200,
             json={
@@ -270,7 +256,6 @@ async def test_mocked_twenty_batch_paced_parity_recovers_three_504s(
         await run.run_scan(
             scan_config_path="unused.yaml",
             dry_run=True,
-            quote_coverage_mode="parity-paced-recovery",
         )
     finally:
         await http.aclose()
@@ -279,12 +264,8 @@ async def test_mocked_twenty_batch_paced_parity_recovers_three_504s(
     assert payload["scanned_symbols"] == 2000
     assert payload["quote_coverage"]["verdict"] == "complete"
     assert payload["quote_coverage"]["initial_call_count"] == 20
-    assert payload["quote_coverage"]["recovery_call_count"] == 3
-    assert payload["quote_coverage"]["max_recovery_calls"] == 3
-    assert payload["quote_coverage"]["max_concurrency"] == 1
-    assert payload["quote_coverage"]["initial_batch_delay_seconds"] == 0.25
-    assert payload["quote_coverage"]["recovery_delay_seconds"] == 1.0
-    assert sum(attempts.values()) == 23
+    assert payload["quote_coverage"]["max_concurrency"] == settings.quote_fetch_concurrency
+    assert sum(attempts.values()) == 20
 
 
 async def test_premarket_scan_finds_yesterdays_mover_from_stored_closes(monkeypatch, tmp_path):
@@ -359,7 +340,6 @@ async def test_premarket_scan_finds_yesterdays_mover_from_stored_closes(monkeypa
             return QuoteCollection(
                 quotes=await self.get_equity_quotes(symbols),
                 coverage=QuoteCoverage(
-                    mode="strict",
                     requested_count=len(ordered),
                     returned_count=len(ordered),
                     stale_retained_count=0,
@@ -371,7 +351,6 @@ async def test_premarket_scan_finds_yesterdays_mover_from_stored_closes(monkeypa
                     unavailable_symbols=(),
                     failed_batches=(),
                     initial_call_count=1,
-                    recovery_call_count=0,
                     max_concurrency=1,
                     complete=True,
                     verdict="complete",

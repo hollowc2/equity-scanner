@@ -187,116 +187,7 @@ async def test_failed_history_task_is_evicted_before_a_later_retry() -> None:
     assert calls == 2
 
 
-async def test_parity_collection_recovers_one_timed_out_batch_without_losing_others() -> None:
-    attempts: dict[str, int] = {}
-
-    def handler(request):
-        symbols = request.url.params["symbols"].split(",")
-        batch = symbols[0]
-        attempts[batch] = attempts.get(batch, 0) + 1
-        if batch == "S100" and attempts[batch] == 1:
-            return httpx.Response(504)
-        return httpx.Response(
-            200,
-            json={"schema_version": "1.0", "quotes": [quote(s) for s in symbols]},
-        )
-
-    http, provider = await _provider(handler, max_attempts=1)
-    try:
-        collection = await provider.get_equity_quote_collection(
-            [f"S{i}" for i in range(201)],
-            mode="parity-bounded-recovery",
-            recovery_delay_seconds=0,
-        )
-    finally:
-        await http.aclose()
-
-    assert len(collection.quotes) == 201
-    assert collection.coverage.complete is True
-    assert collection.coverage.initial_call_count == 3
-    assert collection.coverage.recovery_call_count == 1
-    assert collection.coverage.failed_batch_count == 0
-    assert sum(attempts.values()) == 4
-
-
-async def test_parity_collection_multiple_failed_batches_are_not_retried() -> None:
-    calls = 0
-
-    def handler(request):
-        nonlocal calls
-        calls += 1
-        symbols = request.url.params["symbols"].split(",")
-        if symbols[0] in {"S0", "S100"}:
-            return httpx.Response(504)
-        return httpx.Response(
-            200,
-            json={"schema_version": "1.0", "quotes": [quote(s) for s in symbols]},
-        )
-
-    http, provider = await _provider(handler, max_attempts=1)
-    try:
-        collection = await provider.get_equity_quote_collection(
-            [f"S{i}" for i in range(201)],
-            mode="parity-bounded-recovery",
-            recovery_delay_seconds=0,
-        )
-    finally:
-        await http.aclose()
-
-    assert calls == 3
-    assert set(collection.quotes) == {"S200"}
-    assert collection.coverage.failed_batch_count == 2
-    assert collection.coverage.unavailable_count == 200
-    assert collection.coverage.recovery_call_count == 0
-    assert [failure.error_type for failure in collection.coverage.failed_batches] == [
-        "GatewayTimeoutError",
-        "GatewayTimeoutError",
-    ]
-
-
-async def test_paced_parity_recovers_three_failed_batches_sequentially() -> None:
-    attempts: dict[str, int] = {}
-    active = 0
-    peak_active = 0
-
-    async def handler(request):
-        nonlocal active, peak_active
-        symbols = request.url.params["symbols"].split(",")
-        batch = symbols[0]
-        attempts[batch] = attempts.get(batch, 0) + 1
-        active += 1
-        peak_active = max(peak_active, active)
-        await asyncio.sleep(0)
-        active -= 1
-        if batch in {"S0", "S100", "S200"} and attempts[batch] == 1:
-            return httpx.Response(504)
-        return httpx.Response(
-            200,
-            json={"schema_version": "1.0", "quotes": [quote(s) for s in symbols]},
-        )
-
-    http, provider = await _provider(handler, max_attempts=1)
-    try:
-        collection = await provider.get_equity_quote_collection(
-            [f"S{i}" for i in range(301)],
-            concurrency=4,
-            mode="parity-paced-recovery",
-            initial_batch_delay_seconds=0,
-            recovery_delay_seconds=0,
-        )
-    finally:
-        await http.aclose()
-
-    assert collection.coverage.verdict == "complete"
-    assert collection.coverage.initial_call_count == 4
-    assert collection.coverage.recovery_call_count == 3
-    assert collection.coverage.max_recovery_calls == 3
-    assert collection.coverage.max_concurrency == 1
-    assert sum(attempts.values()) == 7
-    assert peak_active == 1
-
-
-async def test_paced_parity_does_not_recover_more_than_three_failed_batches() -> None:
+async def test_all_batches_failed_is_auditable() -> None:
     calls = 0
 
     def handler(_request):
@@ -306,163 +197,17 @@ async def test_paced_parity_does_not_recover_more_than_three_failed_batches() ->
 
     http, provider = await _provider(handler, max_attempts=1)
     try:
-        collection = await provider.get_equity_quote_collection(
-            [f"S{i}" for i in range(400)],
-            mode="parity-paced-recovery",
-            initial_batch_delay_seconds=0,
-            recovery_delay_seconds=0,
-        )
+        with pytest.raises(GatewayTimeoutError) as caught:
+            await provider.get_equity_quote_collection([f"S{i}" for i in range(250)])
     finally:
         await http.aclose()
 
-    assert calls == 4
-    assert collection.coverage.failed_batch_count == 4
-    assert collection.coverage.recovery_call_count == 0
-    assert collection.coverage.unavailable_count == 400
-
-
-async def test_paced_parity_records_a_failed_recovery_and_continues() -> None:
-    attempts: dict[str, int] = {}
-
-    def handler(request):
-        symbols = request.url.params["symbols"].split(",")
-        batch = symbols[0]
-        attempts[batch] = attempts.get(batch, 0) + 1
-        if batch == "S0" or (batch == "S100" and attempts[batch] == 1):
-            return httpx.Response(504)
-        return httpx.Response(
-            200,
-            json={"schema_version": "1.0", "quotes": [quote(s) for s in symbols]},
-        )
-
-    http, provider = await _provider(handler, max_attempts=1)
-    try:
-        collection = await provider.get_equity_quote_collection(
-            [f"S{i}" for i in range(201)],
-            mode="parity-paced-recovery",
-            initial_batch_delay_seconds=0,
-            recovery_delay_seconds=0,
-        )
-    finally:
-        await http.aclose()
-
-    assert sum(attempts.values()) == 5
-    assert collection.coverage.recovery_call_count == 2
-    assert collection.coverage.failed_batch_count == 1
-    assert collection.coverage.unavailable_count == 100
-    assert collection.coverage.failed_batches[0].recovery_attempted is True
-
-
-async def test_paced_parity_keeps_retrying_a_batch_within_recovery_attempt_budget() -> None:
-    """An outage that outlasts a single recovery call should not sink the whole batch
-    when the caller can afford to wait: recovery keeps retrying the same batch, with
-    backoff, until it succeeds or the attempt budget is exhausted."""
-    attempts: dict[str, int] = {}
-
-    def handler(request):
-        symbols = request.url.params["symbols"].split(",")
-        batch = symbols[0]
-        attempts[batch] = attempts.get(batch, 0) + 1
-        if batch == "S0" and attempts[batch] < 3:
-            return httpx.Response(503)
-        return httpx.Response(
-            200,
-            json={"schema_version": "1.0", "quotes": [quote(s) for s in symbols]},
-        )
-
-    http, provider = await _provider(handler, max_attempts=1)
-    try:
-        collection = await provider.get_equity_quote_collection(
-            [f"S{i}" for i in range(100)],
-            mode="parity-paced-recovery",
-            initial_batch_delay_seconds=0,
-            recovery_delay_seconds=0,
-            max_recovery_attempts=4,
-        )
-    finally:
-        await http.aclose()
-
-    assert attempts["S0"] == 3
-    assert collection.coverage.verdict == "complete"
-    assert collection.coverage.recovery_call_count == 2
-    assert collection.coverage.max_recovery_attempts == 4
-    assert collection.coverage.failed_batch_count == 0
-    assert collection.coverage.unavailable_count == 0
-
-
-async def test_paced_parity_exhausts_recovery_attempt_budget_and_stays_unavailable() -> None:
-    def handler(_request):
-        return httpx.Response(503)
-
-    http, provider = await _provider(handler, max_attempts=1)
-    try:
-        collection = await provider.get_equity_quote_collection(
-            [f"S{i}" for i in range(100)],
-            mode="parity-paced-recovery",
-            initial_batch_delay_seconds=0,
-            recovery_delay_seconds=0,
-            max_recovery_attempts=3,
-        )
-    finally:
-        await http.aclose()
-
-    assert collection.coverage.recovery_call_count == 3
-    assert collection.coverage.failed_batch_count == 1
-    assert collection.coverage.unavailable_count == 100
-    assert collection.coverage.failed_batches[0].recovery_attempted is True
-
-
-async def test_paced_parity_cancellation_stops_during_recovery_delay() -> None:
-    calls = 0
-    initial_finished = asyncio.Event()
-
-    class TimedOutClient:
-        async def get_quotes(self, _symbols):
-            nonlocal calls
-            calls += 1
-            initial_finished.set()
-            raise GatewayTimeoutError("timed out")
-
-    provider = GatewayEquityDataProvider(TimedOutClient(), max_attempts=1)
-    task = asyncio.create_task(
-        provider.get_equity_quote_collection(
-            ["AAPL"],
-            mode="parity-paced-recovery",
-            recovery_delay_seconds=60,
-        )
-    )
-    await initial_finished.wait()
-    await asyncio.sleep(0)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    assert calls == 1
-
-
-async def test_parity_collection_all_batches_failed_is_auditable() -> None:
-    calls = 0
-
-    def handler(_request):
-        nonlocal calls
-        calls += 1
-        return httpx.Response(504)
-
-    http, provider = await _provider(handler, max_attempts=1)
-    try:
-        collection = await provider.get_equity_quote_collection(
-            [f"S{i}" for i in range(250)],
-            mode="parity-bounded-recovery",
-            recovery_delay_seconds=0,
-        )
-    finally:
-        await http.aclose()
-
+    collection = caught.value.quote_collection
     assert calls == 3
     assert collection.quotes == {}
     assert collection.coverage.returned_count == 0
     assert collection.coverage.unavailable_count == 250
     assert collection.coverage.failed_batch_count == 3
-    assert collection.coverage.recovery_call_count == 0
 
 
 async def test_partial_success_has_exact_coverage_accounting() -> None:
@@ -475,7 +220,7 @@ async def test_partial_success_has_exact_coverage_accounting() -> None:
     http, provider = await _provider(handler, max_attempts=1)
     try:
         collection = await provider.get_equity_quote_collection(
-            ["AAPL", "MSFT"], mode="parity-bounded-recovery"
+            ["AAPL", "MSFT"]
         )
     finally:
         await http.aclose()
@@ -538,7 +283,7 @@ async def test_cancelling_collection_cleans_up_all_concurrent_tasks() -> None:
     assert cancelled == 3
 
 
-async def test_twenty_batch_mock_proof_bounds_calls_retries_and_concurrency() -> None:
+async def test_twenty_batch_collection_bounds_calls_and_concurrency() -> None:
     attempts: dict[str, int] = {}
     active = 0
     peak_active = 0
@@ -552,8 +297,6 @@ async def test_twenty_batch_mock_proof_bounds_calls_retries_and_concurrency() ->
         peak_active = max(peak_active, active)
         await asyncio.sleep(0)
         active -= 1
-        if batch == "S900" and attempts[batch] == 1:
-            return httpx.Response(504)
         return httpx.Response(
             200,
             json={"schema_version": "1.0", "quotes": [quote(s) for s in symbols]},
@@ -564,16 +307,13 @@ async def test_twenty_batch_mock_proof_bounds_calls_retries_and_concurrency() ->
         collection = await provider.get_equity_quote_collection(
             [f"S{i}" for i in range(2000)],
             concurrency=4,
-            mode="parity-bounded-recovery",
-            recovery_delay_seconds=0,
         )
     finally:
         await http.aclose()
 
     assert collection.coverage.verdict == "complete"
     assert collection.coverage.initial_call_count == 20
-    assert collection.coverage.recovery_call_count == 1
-    assert sum(attempts.values()) == 21
+    assert sum(attempts.values()) == 20
     assert peak_active == 4
 
 

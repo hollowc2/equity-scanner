@@ -66,9 +66,8 @@
 ## Additive evidence differences
 
 The standalone JSON archive adds `phase_timings_ms` and `quote_coverage`. These fields
-do not alter scan selection or report text. Deterministic parity verifies the remaining
-archive payload against ButterflyGuy, while runtime parity requires internally
-consistent, complete quote-coverage evidence before it can pass.
+do not alter scan selection or report text. The ButterflyGuy parity tests and
+comparator were removed after cutover.
 
 ## Raw equity recording ownership
 

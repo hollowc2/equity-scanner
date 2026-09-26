@@ -31,25 +31,16 @@ class StaleGatewayDataError(RuntimeError):
     """Raised when the gateway explicitly marks a response stale."""
 
 
-QuoteCoverageMode = Literal[
-    "strict",
-    "parity-bounded-recovery",
-    "parity-paced-recovery",
-]
-
-
 @dataclass(frozen=True)
 class QuoteBatchFailure:
     batch_index: int
     symbols: tuple[str, ...]
     error_type: str
     error_message: str
-    recovery_attempted: bool = False
 
 
 @dataclass(frozen=True)
 class QuoteCoverage:
-    mode: QuoteCoverageMode
     requested_count: int
     returned_count: int
     stale_retained_count: int
@@ -61,14 +52,9 @@ class QuoteCoverage:
     unavailable_symbols: tuple[str, ...]
     failed_batches: tuple[QuoteBatchFailure, ...]
     initial_call_count: int
-    recovery_call_count: int
     max_concurrency: int
     complete: bool
     verdict: Literal["complete", "incomplete"]
-    max_recovery_calls: int = 0
-    initial_batch_delay_seconds: float = 0.0
-    recovery_delay_seconds: float = 0.0
-    max_recovery_attempts: int = 1
 
 
 @dataclass(frozen=True)
@@ -186,7 +172,6 @@ class GatewayEquityDataProvider:
             symbols,
             batch_size=batch_size,
             concurrency=concurrency,
-            mode="strict",
         )
         return collection.quotes
 
@@ -196,56 +181,19 @@ class GatewayEquityDataProvider:
         *,
         batch_size: int = 100,
         concurrency: int = 4,
-        mode: QuoteCoverageMode = "strict",
-        recovery_delay_seconds: float = 1.0,
-        initial_batch_delay_seconds: float = 0.25,
-        max_recovery_batches: int = 3,
-        max_recovery_attempts: int = 1,
     ) -> QuoteCollection:
         """Collect bounded quote batches and retain auditable coverage evidence.
 
-        ``strict`` preserves the normal fail-closed behavior, but only after every
-        scheduled batch has settled and its evidence has been retained.
-        ``parity-bounded-recovery`` makes at most one extra, sequential gateway call,
-        and only when exactly one initial batch has a transient gateway failure.
-        ``parity-paced-recovery`` serializes and spaces the initial calls, then makes
-        up to ``max_recovery_attempts`` sequential recovery calls (with exponential
-        backoff off ``recovery_delay_seconds``) per transient failed batch, stopping
-        early on success, when no more than ``max_recovery_batches`` failed initially.
-        Incomplete parity collections are returned so the report and comparator can
-        fail with coverage evidence instead of losing all completed work.
+        Fails closed like the normal quote path, but only after every scheduled batch
+        has settled; the first batch error is raised with the completed collection
+        attached as ``quote_collection``.
         """
-        if mode not in {
-            "strict",
-            "parity-bounded-recovery",
-            "parity-paced-recovery",
-        }:
-            raise ValueError(f"unsupported quote coverage mode: {mode}")
         if concurrency < 1:
             raise ValueError("quote concurrency must be at least 1")
-        if recovery_delay_seconds < 0:
-            raise ValueError("quote recovery delay must not be negative")
-        if initial_batch_delay_seconds < 0:
-            raise ValueError("initial quote batch delay must not be negative")
-        if max_recovery_batches < 1:
-            raise ValueError("maximum recovery batches must be at least 1")
-        if max_recovery_attempts < 1:
-            raise ValueError("maximum recovery attempts must be at least 1")
-
-        paced = mode == "parity-paced-recovery"
-        effective_concurrency = 1 if paced else concurrency
-        effective_initial_delay = initial_batch_delay_seconds if paced else 0.0
-        if paced:
-            max_recovery_calls = max_recovery_batches
-        elif mode == "parity-bounded-recovery":
-            max_recovery_calls = 1
-        else:
-            max_recovery_calls = 0
 
         requested_symbols = list(dict.fromkeys(symbols))
         if not requested_symbols:
             coverage = QuoteCoverage(
-                mode=mode,
                 requested_count=0,
                 returned_count=0,
                 stale_retained_count=0,
@@ -257,14 +205,9 @@ class GatewayEquityDataProvider:
                 unavailable_symbols=(),
                 failed_batches=(),
                 initial_call_count=0,
-                recovery_call_count=0,
-                max_concurrency=effective_concurrency,
+                max_concurrency=concurrency,
                 complete=True,
                 verdict="complete",
-                max_recovery_calls=max_recovery_calls,
-                initial_batch_delay_seconds=effective_initial_delay,
-                recovery_delay_seconds=recovery_delay_seconds,
-                max_recovery_attempts=max_recovery_attempts,
             )
             return QuoteCollection(quotes={}, coverage=coverage)
         gateway_to_requested: dict[str, str] = {}
@@ -278,8 +221,7 @@ class GatewayEquityDataProvider:
             gateway_symbols[i : i + batch_size]
             for i in range(0, len(gateway_symbols), batch_size)
         ]
-        sem = asyncio.Semaphore(effective_concurrency)
-        transient_errors = (GatewayCapacityError, GatewayTimeoutError, GatewayUnavailableError)
+        sem = asyncio.Semaphore(concurrency)
 
         @dataclass(frozen=True)
         class _BatchResult:
@@ -292,28 +234,18 @@ class GatewayEquityDataProvider:
                 response = await self._retry(lambda: self._client.get_quotes(chunk))
                 return _BatchResult(batch_index, tuple(chunk), tuple(response.quotes))
 
-        if paced:
-            settled: list[_BatchResult | BaseException] = []
-            for batch_index, chunk in enumerate(chunks):
-                if batch_index and effective_initial_delay:
-                    await asyncio.sleep(effective_initial_delay)
-                try:
-                    settled.append(await _fetch(batch_index, chunk))
-                except Exception as exc:
-                    settled.append(exc)
-        else:
-            tasks = [
-                asyncio.create_task(_fetch(batch_index, chunk))
-                for batch_index, chunk in enumerate(chunks)
-            ]
-            try:
-                settled = await asyncio.gather(*tasks, return_exceptions=True)
-            except BaseException:
-                for task in tasks:
-                    if not task.done():
-                        task.cancel()
-                await asyncio.gather(*tasks, return_exceptions=True)
-                raise
+        tasks = [
+            asyncio.create_task(_fetch(batch_index, chunk))
+            for batch_index, chunk in enumerate(chunks)
+        ]
+        try:
+            settled = await asyncio.gather(*tasks, return_exceptions=True)
+        except BaseException:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
 
         batch_results: dict[int, _BatchResult] = {}
         initial_failures: dict[int, BaseException] = {}
@@ -322,77 +254,6 @@ class GatewayEquityDataProvider:
                 initial_failures[batch_index] = result
             else:
                 batch_results[batch_index] = result
-
-        recovery_call_count = 0
-        recovery_attempted: set[int] = set()
-        transient_failures = [
-            batch_index
-            for batch_index, error in initial_failures.items()
-            if isinstance(error, transient_errors)
-        ]
-        recovery_batches: list[int] = []
-        if (
-            mode == "parity-bounded-recovery"
-            and len(initial_failures) == 1
-            and len(transient_failures) == 1
-        ):
-            recovery_batches = transient_failures
-        elif (
-            paced
-            and 0 < len(initial_failures) <= max_recovery_batches
-            and len(transient_failures) == len(initial_failures)
-        ):
-            recovery_batches = sorted(transient_failures)
-
-        for batch_index in recovery_batches:
-            recovery_attempted.add(batch_index)
-            for attempt in range(1, max_recovery_attempts + 1):
-                recovery_call_count += 1
-                delay = recovery_delay_seconds * (2 ** (attempt - 1))
-                log.warning(
-                    "gateway_quote_batch_recovery_scheduled batch_id=%d symbol_count=%d "
-                    "delay_seconds=%.3f recovery_call=%d max_recovery_calls=%d attempt=%d "
-                    "max_recovery_attempts=%d",
-                    batch_index,
-                    len(chunks[batch_index]),
-                    delay,
-                    recovery_call_count,
-                    max_recovery_calls,
-                    attempt,
-                    max_recovery_attempts,
-                )
-                if delay:
-                    await asyncio.sleep(delay)
-                try:
-                    # Deliberately bypass provider retries. The named policy owns this
-                    # explicit, globally bounded recovery call budget.
-                    response = await self._client.get_quotes(chunks[batch_index])
-                    batch_results[batch_index] = _BatchResult(
-                        batch_index,
-                        tuple(chunks[batch_index]),
-                        tuple(response.quotes),
-                    )
-                    initial_failures.pop(batch_index)
-                    log.info(
-                        "gateway_quote_batch_recovery_succeeded batch_id=%d symbol_count=%d "
-                        "attempt=%d",
-                        batch_index,
-                        len(chunks[batch_index]),
-                        attempt,
-                    )
-                    break
-                except Exception as exc:
-                    initial_failures[batch_index] = exc
-                    log.warning(
-                        "gateway_quote_batch_recovery_failed batch_id=%d symbol_count=%d "
-                        "error_type=%s error=%s attempt=%d max_recovery_attempts=%d",
-                        batch_index,
-                        len(chunks[batch_index]),
-                        type(exc).__name__,
-                        exc,
-                        attempt,
-                        max_recovery_attempts,
-                    )
 
         quotes: dict[str, QuoteV1] = {}
         stale_symbols: set[str] = set()
@@ -441,27 +302,24 @@ class GatewayEquityDataProvider:
                 symbols=tuple(gateway_to_requested[symbol] for symbol in chunks[batch_index]),
                 error_type=type(error).__name__,
                 error_message=str(error),
-                recovery_attempted=batch_index in recovery_attempted,
             )
             for batch_index, error in sorted(initial_failures.items())
         )
         for failure in failures:
             log.warning(
                 "gateway_quote_batch_failed batch_id=%d symbol_count=%d symbols=%s "
-                "error_type=%s error=%s recovery_attempted=%s",
+                "error_type=%s error=%s",
                 failure.batch_index,
                 len(failure.symbols),
                 ",".join(failure.symbols),
                 failure.error_type,
                 failure.error_message,
-                failure.recovery_attempted,
             )
 
         returned_symbols = tuple(symbol for symbol in requested_symbols if symbol in quotes)
         unavailable_symbols = tuple(symbol for symbol in requested_symbols if symbol not in quotes)
         complete = not unavailable_symbols and not failures
         coverage = QuoteCoverage(
-            mode=mode,
             requested_count=len(requested_symbols),
             returned_count=len(returned_symbols),
             stale_retained_count=len(stale_symbols),
@@ -475,23 +333,15 @@ class GatewayEquityDataProvider:
             unavailable_symbols=unavailable_symbols,
             failed_batches=failures,
             initial_call_count=len(chunks),
-            recovery_call_count=recovery_call_count,
-            max_concurrency=min(effective_concurrency, len(chunks)),
+            max_concurrency=min(concurrency, len(chunks)),
             complete=complete,
             verdict="complete" if complete else "incomplete",
-            max_recovery_calls=max_recovery_calls,
-            initial_batch_delay_seconds=effective_initial_delay,
-            recovery_delay_seconds=recovery_delay_seconds,
-            max_recovery_attempts=max_recovery_attempts,
         )
         collection = QuoteCollection(quotes=quotes, coverage=coverage)
         log.info(
-            "gateway_quote_coverage mode=%s verdict=%s requested=%d returned=%d "
+            "gateway_quote_coverage verdict=%s requested=%d returned=%d "
             "stale_retained=%d unavailable=%d failed_batches=%d initial_calls=%d "
-            "recovery_calls=%d max_recovery_calls=%d max_concurrency=%d "
-            "initial_batch_delay_seconds=%.3f recovery_delay_seconds=%.3f "
-            "max_recovery_attempts=%d",
-            mode,
+            "max_concurrency=%d",
             coverage.verdict,
             coverage.requested_count,
             coverage.returned_count,
@@ -499,18 +349,13 @@ class GatewayEquityDataProvider:
             coverage.unavailable_count,
             coverage.failed_batch_count,
             coverage.initial_call_count,
-            coverage.recovery_call_count,
-            coverage.max_recovery_calls,
             coverage.max_concurrency,
-            coverage.initial_batch_delay_seconds,
-            coverage.recovery_delay_seconds,
-            coverage.max_recovery_attempts,
         )
 
-        if mode == "strict" and failures:
+        if failures:
             first_error = initial_failures[failures[0].batch_index]
             # Preserve the SDK exception type while making completed evidence
-            # available to strict-mode callers that choose to inspect it.
+            # available to callers that choose to inspect it.
             first_error.quote_collection = collection  # type: ignore[attr-defined]
             raise first_error
         return collection
