@@ -2,11 +2,11 @@
 from ButterflyGuy's scripts/run_morning_scan.py. Wires universes -> quotes -> volume
 -> snapshots -> ranking -> news -> report -> archive -> Discord end to end.
 
-Keeps the original's two-pass structure: a preliminary rank on the closing-price-
-derived `prior_day_pct` decides which symbols are worth a `fetch_prior_day_changes`
-history refetch (opening-focus/gainers/losers candidates, not the whole universe —
-that's a deliberate cost-control choice, not an accident), then re-ranks with the
-more accurate prior-day change attached."""
+Keeps the original's two-pass structure: a preliminary rank on the prior-day change
+derived from stored morning closes (see closes.py) decides which symbols are worth a
+`fetch_prior_day_changes` history refetch (opening-focus/gainers/losers candidates,
+not the whole universe — that's a deliberate cost-control choice, not an accident),
+then re-ranks with the split-adjusted history change attached."""
 
 from __future__ import annotations
 
@@ -17,6 +17,11 @@ import os
 import time
 from dataclasses import asdict, replace
 
+from equity_scanner.closes import (
+    load_previous_closes,
+    prior_day_changes_from_closes,
+    record_closes,
+)
 from equity_scanner.config import AppSettings
 from equity_scanner.gateway import build_gateway_client
 from equity_scanner.news import fetch_news_impacts
@@ -167,25 +172,71 @@ async def run_scan(
 
         in_premarket = is_premarket_window(generated_at, start=scan_config.premarket_start_et)
 
-        avg_volumes: dict[str, float] = {}
+        # 20d average daily volume drives both the liquidity filter and RVOL. The
+        # weekly refresh already measured it for the liquid universe. Names it left
+        # out are mostly below the liquidity floor, so history is fetched only where
+        # the answer matters today — premarket-active (RVOL) or custom-watchlist
+        # names — and bounded so a missing liquid_meta can't fan out per symbol.
+        avg_volumes = {
+            symbol: float(payload["avg_volume_20d"])
+            for symbol, payload in liquid_meta.items()
+            if symbol in symbol_map
+            and isinstance(payload, dict)
+            and isinstance(payload.get("avg_volume_20d"), (int, float))
+            and payload["avg_volume_20d"] > 0
+        }
         phase_started = time.perf_counter()
-        if scan_config.filters.min_rvol > 0:
-            rvol_symbols = symbols_needing_rvol_fetch(quotes, in_premarket=in_premarket)
-            log.info(
-                "equity_scan_rvol_targets universe=%d needing_rvol=%d",
-                len(symbols),
-                len(rvol_symbols),
-            )
-            avg_volumes = await fetch_avg_volumes(
-                provider,
-                rvol_symbols,
-                lookback_days=scan_config.rvol_lookback_days,
-                concurrency=scan_config.rvol_fetch_concurrency,
-            )
-            log.info("equity_scan_rvol_loaded symbols_with_avg_volume=%d", len(avg_volumes))
-        else:
-            log.info("equity_scan_rvol_skipped reason=min_rvol_disabled")
+        premarket_active = symbols_needing_rvol_fetch(
+            quotes,
+            in_premarket=in_premarket,
+            generated_at=generated_at,
+            premarket_start=scan_config.premarket_start_et,
+        )
+        custom_symbols = sorted(
+            symbol for symbol in quotes if "custom" in symbol_map.get(symbol, ())
+        )
+        missing = [
+            symbol
+            for symbol in dict.fromkeys([*custom_symbols, *premarket_active])
+            if symbol not in avg_volumes
+        ]
+        avg_volume_targets = missing[: scan_config.avg_volume_fetch_limit]
+        log.info(
+            "equity_scan_avg_volume_targets universe=%d premarket_active=%d from_liquid_meta=%d "
+            "missing=%d fetching=%d",
+            len(symbols),
+            len(premarket_active),
+            len(avg_volumes),
+            len(missing),
+            len(avg_volume_targets),
+        )
+        fetched_avg_volumes = await fetch_avg_volumes(
+            provider,
+            avg_volume_targets,
+            lookback_days=scan_config.rvol_lookback_days,
+            concurrency=scan_config.rvol_fetch_concurrency,
+        )
+        avg_volumes.update(fetched_avg_volumes)
+        log.info("equity_scan_rvol_loaded symbols_with_avg_volume=%d", len(avg_volumes))
         _record_phase(phase_timings_ms, "rvol_history", phase_started)
+
+        try:
+            closes_path = record_closes(
+                quotes, closes_dir=scan_config.closes_dir, generated_at=generated_at
+            )
+        except OSError as exc:
+            # Only tomorrow's prior-day coverage depends on this; today's post must not.
+            closes_path = None
+            log.warning("equity_scan_closes_record_failed error=%s", exc)
+        closes_prior_day = prior_day_changes_from_closes(
+            quotes,
+            load_previous_closes(scan_config.closes_dir, today=generated_at.date()),
+        )
+        log.info(
+            "equity_scan_prior_day_from_closes symbols=%d recorded=%s",
+            len(closes_prior_day),
+            closes_path,
+        )
 
         phase_started = time.perf_counter()
         rejected_symbols: dict[str, int] = {}
@@ -197,6 +248,7 @@ async def run_scan(
             avg_volumes=avg_volumes,
             sector_map=sector_map,
             reference_prices=reference_prices,
+            prior_day_changes=closes_prior_day,
             in_premarket=in_premarket,
             generated_at=generated_at,
             rejected_symbols=rejected_symbols,
@@ -226,10 +278,13 @@ async def run_scan(
 
         phase_started = time.perf_counter()
         if prior_day_changes:
-            # Fresh dicts, not the pass-1 ones: this re-classifies every symbol from
-            # scratch against the now-accurate prior_day_pct, so reusing the pass-1
-            # dicts would double-count symbols rejected the same way in both passes.
-            # These become the final rejected_symbols/bad_data for reporting below.
+            # History bars are split-adjusted, so they override the closes-derived
+            # change for the ranked candidates. Fresh dicts, not the pass-1 ones: this
+            # re-classifies every symbol from scratch against the now-accurate
+            # prior_day_pct, so reusing the pass-1 dicts would double-count symbols
+            # rejected the same way in both passes. These become the final
+            # rejected_symbols/bad_data for reporting below.
+            prior_day_changes = {**closes_prior_day, **prior_day_changes}
             rejected_symbols = {}
             bad_data = []
             snapshots = build_snapshots(

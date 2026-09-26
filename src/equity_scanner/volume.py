@@ -11,6 +11,8 @@ from typing import Protocol
 
 from schwab_gateway_sdk import QuoteV1
 
+from equity_scanner.time_utils import EASTERN
+
 
 class DailyBarsProvider(Protocol):
     async def get_daily_bars(self, symbol: str, days_back: int | None = None) -> list[dict]: ...
@@ -80,24 +82,49 @@ def compute_rvol(premarket_volume: int, avg_volume: float | None) -> float | Non
     return premarket_volume / avg_volume
 
 
-def symbols_needing_rvol_fetch(quotes: dict[str, QuoteV1], *, in_premarket: bool) -> list[str]:
-    """Symbols with premarket volume — only these need avg-volume for RVOL filter.
+def todays_premarket_volume(
+    quote: QuoteV1,
+    *,
+    generated_at: dt.datetime,
+    premarket_start: str = "04:00",
+) -> int:
+    """The quote's volume when it reflects trading today since the premarket start.
 
-    Adapted for the gateway's flat QuoteV1: ButterflyGuy's raw payload carried
-    regular and extended volume simultaneously and checked extended's directly. The
-    gateway keeps only one volume figure, for whichever session it resolved as
-    freshest, so a symbol needs rvol data whenever that session was "extended" with
-    nonzero volume (see SchwabGateway's normalize_schwab_quote). Also requires
-    `in_premarket`: the gateway reports "extended" post-close just as much as
-    pre-open, and rvol is specifically a premarket-activity signal — without this
-    gate, an after-hours run would fetch avg-volume for symbols showing only
-    after-hours activity, not premarket."""
+    Before the open Schwab stamps its regular-session block with premarket trades, so
+    the gateway (which keeps the regular session on a timestamp tie) reports
+    session="regular" with today's premarket cumulative volume. The event timestamp,
+    not the session label, says whether the volume is today's: a quote last updated
+    yesterday carries after-hours activity, not premarket."""
+    volume = _as_int(quote.volume)
+    if volume <= 0 or quote.event_timestamp is None:
+        return 0
+    event = quote.event_timestamp.astimezone(EASTERN)
+    now = generated_at.astimezone(EASTERN)
+    if event.date() != now.date() or event.time() < dt.time.fromisoformat(premarket_start):
+        return 0
+    return volume
+
+
+def symbols_needing_rvol_fetch(
+    quotes: dict[str, QuoteV1],
+    *,
+    in_premarket: bool,
+    generated_at: dt.datetime,
+    premarket_start: str = "04:00",
+) -> list[str]:
+    """Symbols with premarket volume today — only these need avg-volume for RVOL.
+
+    Gated on `in_premarket`: rvol is specifically a premarket-activity signal, so an
+    after-hours run must not treat post-close activity as premarket."""
     if not in_premarket:
         return []
     return sorted(
         symbol
         for symbol, quote in quotes.items()
-        if quote.session == "extended" and (quote.volume or 0) > 0
+        if todays_premarket_volume(
+            quote, generated_at=generated_at, premarket_start=premarket_start
+        )
+        > 0
     )
 
 

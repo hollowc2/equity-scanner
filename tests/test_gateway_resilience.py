@@ -580,3 +580,30 @@ async def test_twenty_batch_mock_proof_bounds_calls_retries_and_concurrency() ->
 def test_no_direct_schwab_client_is_initialized() -> None:
     import equity_scanner.gateway as gateway
     assert not hasattr(gateway, "SchwabClientWrapper")
+
+
+async def test_class_share_daily_history_is_translated_at_gateway_boundary() -> None:
+    requested = []
+
+    def handler(request):
+        requested.append(request.url.params["symbol"])
+        return httpx.Response(
+            200,
+            json={
+                "schema_version": "1.0",
+                "history": {
+                    "symbol": request.url.params["symbol"], "frequency": "daily",
+                    "bars": [], "event_timestamp": None, "gateway_received_at": NOW,
+                    "source": "test", "stale": False, "age_seconds": None,
+                    "data_quality_flags": [],
+                },
+            },
+        )
+
+    http, provider = await _provider(handler)
+    try:
+        assert await provider.get_daily_bars("BRK.B") == []
+    finally:
+        await http.aclose()
+
+    assert requested == ["BRK/B"]
