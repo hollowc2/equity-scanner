@@ -17,10 +17,11 @@ from pydantic import BaseModel, Field
 
 class EquityScanFilters(BaseModel):
     min_price: float = 5.0
-    min_volume: int = 500_000
+    min_volume: int = 500_000  # 20d avg daily volume; current volume when unknown
     prior_day_min_pct: float = 3.0
     premarket_min_gap_pct: float = 2.0
-    min_rvol: float = 0.0  # 0 = disabled; e.g. 0.05 = 5% of 20d avg daily volume
+    # Premarket gap lists only: premarket volume / 20d avg daily volume. 0 = any trade.
+    min_rvol: float = 0.0
     max_abs_pct: float | None = 50.0  # cap extreme % moves; None = off
     max_price_disagreement_pct: float | None = 5.0
     max_reference_price_deviation_pct: float | None = 25.0
@@ -89,6 +90,8 @@ class EquityScanSettings(BaseModel):
     mover_indexes: list[str] = Field(default_factory=lambda: ["NASDAQ", "NYSE", "EQUITY_ALL"])
     premarket_start_et: str = "04:00"
     report_dir: str = "reports/equity_scans"
+    closes_dir: str = "reports/closes"
+    avg_volume_fetch_limit: int = Field(default=100, ge=0)
     context_symbols: list[str] = Field(
         default_factory=lambda: ["$SPX", "$COMPX", "$DJI", "SPY", "QQQ"]
     )

@@ -29,6 +29,7 @@ from schwab_gateway_sdk import QuoteV1
 from equity_scanner.news import NewsImpact
 from equity_scanner.scan_config import EquityScanSettings
 from equity_scanner.time_utils import is_market_open, is_premarket_window
+from equity_scanner.volume import todays_premarket_volume
 
 INDEX_UNIVERSES = frozenset({"sp500", "nq100"})
 
@@ -154,6 +155,7 @@ def parse_equity_quote(
     max_reference_price_deviation_pct: float | None = None,
     prior_day_pct_override: float | None = None,
     reject_reasons: list[dict[str, Any]] | None = None,
+    premarket_start: str = "04:00",
 ) -> EquitySnapshot | None:
     """Normalize a gateway QuoteV1 into an EquitySnapshot.
 
@@ -167,8 +169,9 @@ def parse_equity_quote(
       premarket this guard is unavailable — a real coverage loss, not a bug.
     - `volume`/`premarket_volume` come from the single volume figure the gateway
       reports for whichever session won, not a simultaneous regular+extended pair.
-      During premarket, `volume` reflects extended-session cumulative volume, not
-      the prior full trading day's total the way it did before.
+      During premarket, `volume` is today's premarket cumulative volume, not the
+      prior full trading day's total, so liquidity filtering uses `avg_volume_20d`
+      when it is known (see `passes_filters`).
     """
     prior_close = quote.close
     if prior_close is None or prior_close <= 0:
@@ -228,12 +231,17 @@ def parse_equity_quote(
             return None
 
     volume = _as_int(quote.volume)
-    # Gated on in_premarket, not just session=="extended": the gateway reports
-    # "extended" whenever extended is fresher than regular, which is true after the
-    # 4pm close as much as before the 9:30am open — without this gate, an after-hours
-    # run would mislabel post-close volume as a premarket rvol/gap signal.
-    premarket_volume = volume if (in_premarket and quote.session == "extended") else 0
-    if in_premarket and quote.session == "extended" and premarket_volume <= 0:
+    # Gated on in_premarket so an after-hours run never labels post-close volume as
+    # premarket; within the window the quote must have traded today (see
+    # todays_premarket_volume for why the session label can't be used).
+    premarket_volume = (
+        todays_premarket_volume(
+            quote, generated_at=generated_at, premarket_start=premarket_start
+        )
+        if in_premarket and generated_at is not None
+        else 0
+    )
+    if in_premarket and quote.session == "extended" and volume <= 0:
         flags.append("extended_price_without_volume")
     rvol = _compute_rvol(premarket_volume, avg_volume_20d)
 
@@ -265,7 +273,12 @@ def _compute_rvol(premarket_volume: int, avg_volume: float | None) -> float | No
 
 def passes_filters(snapshot: EquitySnapshot, settings: EquityScanSettings) -> bool:
     filters = settings.filters
-    if snapshot.price < filters.min_price or snapshot.volume < filters.min_volume:
+    # Liquidity is judged on typical daily volume: before the open `volume` is only
+    # today's premarket volume, which rejects nearly every name at a daily-size floor.
+    liquidity_volume = (
+        snapshot.avg_volume_20d if snapshot.avg_volume_20d is not None else snapshot.volume
+    )
+    if snapshot.price < filters.min_price or liquidity_volume < filters.min_volume:
         return False
     universe_set = set(snapshot.universes)
     if (
@@ -278,9 +291,18 @@ def passes_filters(snapshot: EquitySnapshot, settings: EquityScanSettings) -> bo
         cap = filters.max_abs_pct
         if abs(snapshot.prior_day_pct) > cap or abs(snapshot.session_gap_pct) > cap:
             return False
-    if filters.min_rvol > 0 and snapshot.premarket_volume > 0:
-        return snapshot.rvol is not None and snapshot.rvol >= filters.min_rvol
     return True
+
+
+def has_premarket_activity(snapshot: EquitySnapshot, settings: EquityScanSettings) -> bool:
+    """Premarket gap lists need trading today at a meaningful share of normal volume.
+
+    Applied only to the gap lists, not `passes_filters`: light premarket trading must
+    not hide a name from the prior-day sections."""
+    if snapshot.premarket_volume <= 0:
+        return False
+    min_rvol = settings.filters.min_rvol
+    return min_rvol <= 0 or (snapshot.rvol is not None and snapshot.rvol >= min_rvol)
 
 
 def _mover_change_pct(item: dict[str, Any]) -> float | None:
@@ -372,6 +394,7 @@ def build_snapshots(
             max_reference_price_deviation_pct=settings.filters.max_reference_price_deviation_pct,
             prior_day_pct_override=prior_day_changes.get(symbol),
             reject_reasons=reject_reasons,
+            premarket_start=settings.premarket_start_et,
         )
         if snapshot is None:
             if rejected_symbols is not None:
@@ -553,15 +576,16 @@ def rank_scan_results(
     premarket_gainers: list[EquitySnapshot] = []
     premarket_losers: list[EquitySnapshot] = []
     if show_premarket:
+        active = [snap for snap in snapshots if has_premarket_activity(snap, settings)]
         premarket_gainers = _top(
-            snapshots,
+            active,
             key="session_gap_pct",
             reverse=True,
             min_abs_pct=filters.premarket_min_gap_pct,
             limit=limits.premarket_gainers,
         )
         premarket_losers = _top(
-            snapshots,
+            active,
             key="session_gap_pct",
             reverse=False,
             min_abs_pct=filters.premarket_min_gap_pct,

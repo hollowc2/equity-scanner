@@ -151,7 +151,7 @@ class GatewayEquityDataProvider:
             async def _load() -> tuple[dict, ...]:
                 response = await self._retry(
                     lambda: self._client.get_history(
-                        symbol,
+                        _gateway_symbol(symbol),
                         frequency="daily",
                         days_back=days_back,
                     )
