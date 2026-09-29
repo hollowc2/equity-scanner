@@ -462,3 +462,86 @@ def test_min_rvol_limits_premarket_gap_lists_but_not_prior_day_sections() -> Non
     assert {snapshot.symbol for snapshot in snapshots} == {"LIGHT", "HEAVY", "AFTERHOURS"}
     assert [snapshot.symbol for snapshot in results.prior_gainers] == ["LIGHT"]
     assert [snapshot.symbol for snapshot in results.premarket_gainers] == ["HEAVY"]
+
+
+def test_opening_focus_ignores_premarket_gap_on_a_thin_print() -> None:
+    """A stale 2-share premarket print can show a 15% "gap"; Opening Focus must not
+    rank on it, while a gap backed by real premarket volume still leads."""
+    settings = EquityScanSettings(filters={"min_rvol": 0.0})  # floor still applies
+    quotes = {
+        "THIN": _quote(
+            session="regular",
+            close=40.0,
+            last=46.0,
+            net_percent_change=15.0,
+            volume=2,
+            event_timestamp=TRADED_PREMARKET,
+        ),
+        "HEAVY": _quote(
+            session="regular",
+            close=50.0,
+            last=52.0,
+            net_percent_change=4.0,
+            volume=1_000_000,
+            event_timestamp=TRADED_PREMARKET,
+        ),
+    }
+    snapshots = build_snapshots(
+        quotes,
+        {symbol: {"liquid"} for symbol in quotes},
+        settings,
+        avg_volumes={"THIN": 2_000_000.0, "HEAVY": 5_000_000.0},
+        prior_day_changes={"THIN": 0.0, "HEAVY": 0.5},
+        in_premarket=True,
+        generated_at=PREMARKET_AT,
+    )
+
+    results = rank_scan_results(
+        snapshots,
+        settings=settings,
+        movers_up=[],
+        movers_down=[],
+        market_context=[],
+        scanned_symbols=len(quotes),
+        generated_at=PREMARKET_AT,
+    )
+
+    focus = {item.snapshot.symbol: item for item in results.opening_focus}
+    assert "gap with volume" in focus["HEAVY"].reasons
+    assert "THIN" not in focus or "gap with volume" not in focus["THIN"].reasons
+    assert [item.snapshot.symbol for item in results.opening_focus][0] == "HEAVY"
+
+
+def test_opening_focus_uses_regular_move_after_the_open() -> None:
+    """After the open there is no premarket volume; the regular-session move still
+    counts toward Opening Focus."""
+    settings = EquityScanSettings(filters={"min_rvol": 0.05})
+    quotes = {
+        "RUNNER": _quote(
+            session="regular",
+            close=100.0,
+            last=106.0,
+            net_percent_change=6.0,
+            volume=3_000_000,
+        ),
+    }
+    snapshots = build_snapshots(
+        quotes,
+        {"RUNNER": {"liquid"}},
+        settings,
+        avg_volumes={"RUNNER": 5_000_000.0},
+        prior_day_changes={"RUNNER": 4.0},
+    )
+
+    results = rank_scan_results(
+        snapshots,
+        settings=settings,
+        movers_up=[],
+        movers_down=[],
+        market_context=[],
+        scanned_symbols=len(quotes),
+        generated_at=dt.datetime(2026, 8, 19, 11, 0, tzinfo=EASTERN),
+    )
+
+    assert [item.snapshot.symbol for item in results.opening_focus] == ["RUNNER"]
+    assert "continuation setup" in results.opening_focus[0].reasons

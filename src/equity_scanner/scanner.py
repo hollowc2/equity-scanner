@@ -32,6 +32,9 @@ from equity_scanner.time_utils import is_market_open, is_premarket_window
 from equity_scanner.volume import todays_premarket_volume
 
 INDEX_UNIVERSES = frozenset({"sp500", "nq100"})
+# Opening Focus never treats premarket volume below this share of 20d avg volume as
+# real, even when filters.min_rvol is 0.
+FOCUS_MIN_RVOL = 0.05
 
 
 @dataclass(frozen=True)
@@ -424,29 +427,44 @@ def attach_news_impacts(
     ]
 
 
+def _has_focus_volume(snapshot: EquitySnapshot, settings: EquityScanSettings) -> bool:
+    """Premarket volume that is a real share of normal daily volume.
+
+    Floored at FOCUS_MIN_RVOL even when `min_rvol` is 0, so a stale 1–3 share print
+    can never count as volume."""
+    floor = max(settings.filters.min_rvol, FOCUS_MIN_RVOL)
+    return snapshot.rvol is not None and snapshot.rvol >= floor
+
+
+def _focus_gap_pct(
+    snapshot: EquitySnapshot, settings: EquityScanSettings, *, premarket: bool
+) -> float:
+    """The gap Opening Focus may act on.
+
+    Before the open a gap is only trusted with meaningful premarket volume behind it:
+    a thin print can show an 8–20% "gap" on a handful of shares. After the open the
+    gap is the regular-session move and needs no premarket volume."""
+    if premarket and not _has_focus_volume(snapshot, settings):
+        return 0.0
+    return snapshot.session_gap_pct
+
+
 def _focus_reasons(
     snapshot: EquitySnapshot,
     settings: EquityScanSettings,
     *,
+    gap_pct: float,
     sector_counts: dict[str, int],
 ) -> tuple[str, ...]:
     filters = settings.filters
     reasons: list[str] = []
-    gap_ok = abs(snapshot.session_gap_pct) >= filters.premarket_min_gap_pct
+    gap_ok = abs(gap_pct) >= filters.premarket_min_gap_pct
     prior_ok = abs(snapshot.prior_day_pct) >= filters.prior_day_min_pct
-    volume_ok = (
-        (snapshot.rvol is not None and snapshot.rvol >= max(filters.min_rvol, 0.05))
-        or snapshot.premarket_volume > 0
-    )
-    if gap_ok and volume_ok:
+    if gap_ok and _has_focus_volume(snapshot, settings):
         reasons.append("gap with volume")
-    if prior_ok and gap_ok and snapshot.prior_day_pct * snapshot.session_gap_pct > 0:
+    if prior_ok and gap_ok and snapshot.prior_day_pct * gap_pct > 0:
         reasons.append("continuation setup")
-    if (
-        abs(snapshot.prior_day_pct) >= filters.prior_day_min_pct
-        and abs(snapshot.session_gap_pct) >= filters.premarket_min_gap_pct
-        and snapshot.prior_day_pct * snapshot.session_gap_pct < 0
-    ):
+    if prior_ok and gap_ok and snapshot.prior_day_pct * gap_pct < 0:
         reasons.append("fade risk")
     if "custom" in snapshot.universes and (gap_ok or prior_ok):
         reasons.append("custom watchlist")
@@ -463,19 +481,27 @@ def rank_opening_focus(
     snapshots: list[EquitySnapshot],
     *,
     settings: EquityScanSettings,
+    premarket: bool = False,
 ) -> list[OpeningFocusItem]:
     """Rank names that deserve attention near or after the open."""
+    gaps = {
+        snapshot.symbol: _focus_gap_pct(snapshot, settings, premarket=premarket)
+        for snapshot in snapshots
+    }
     sector_counts: dict[str, int] = {}
     for snapshot in snapshots:
         if (
-            abs(snapshot.session_gap_pct) >= settings.filters.premarket_min_gap_pct
+            abs(gaps[snapshot.symbol]) >= settings.filters.premarket_min_gap_pct
             or abs(snapshot.prior_day_pct) >= settings.filters.prior_day_min_pct
         ):
             sector_counts[snapshot.sector] = sector_counts.get(snapshot.sector, 0) + 1
 
     items: list[OpeningFocusItem] = []
     for snapshot in snapshots:
-        reasons = _focus_reasons(snapshot, settings, sector_counts=sector_counts)
+        gap_pct = gaps[snapshot.symbol]
+        reasons = _focus_reasons(
+            snapshot, settings, gap_pct=gap_pct, sector_counts=sector_counts
+        )
         if not reasons:
             continue
         rvol_score = min(snapshot.rvol or 0.0, 2.0) * 10.0
@@ -484,7 +510,7 @@ def rank_opening_focus(
         sector_score = 3.0 if "sector cluster" in reasons else 0.0
         news_score = snapshot.news.score if snapshot.news is not None else 0.0
         score = (
-            abs(snapshot.session_gap_pct) * 2.0
+            abs(gap_pct) * 2.0
             + abs(snapshot.prior_day_pct)
             + rvol_score
             + custom_score
@@ -602,7 +628,9 @@ def rank_scan_results(
         )
 
     return ScanResults(
-        opening_focus=rank_opening_focus(snapshots, settings=settings),
+        opening_focus=rank_opening_focus(
+            snapshots, settings=settings, premarket=show_premarket
+        ),
         catalyst_watch=rank_catalyst_watch(snapshots, settings=settings),
         prior_gainers=prior_gainers,
         prior_losers=prior_losers,
