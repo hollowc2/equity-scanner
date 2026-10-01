@@ -70,7 +70,7 @@ def _news_candidate_symbols(snapshots: list[EquitySnapshot], *, limit: int) -> l
         key=lambda snap: (
             "custom" in snap.universes,
             abs(snap.session_gap_pct),
-            abs(snap.prior_day_pct),
+            abs(snap.prior_day_pct or 0.0),
             snap.volume,
         ),
         reverse=True,
@@ -255,6 +255,18 @@ async def run_scan(
             quote_coverage=quote_coverage,
         )
         prior_day_symbols = _prior_day_change_symbols(preliminary_results)
+        # Keep history recovery bounded, but include candidates whose unknown prior
+        # move could not put them in yesterday's rankings (including catalyst names).
+        if in_premarket:
+            unknown_symbols = {
+                snap.symbol for snap in snapshots if snap.prior_day_pct is None
+            }
+            recovery_candidates = _news_candidate_symbols(
+                snapshots, limit=scan_config.news.max_symbols
+            )
+            prior_day_symbols = sorted(
+                set(prior_day_symbols) | (set(recovery_candidates) & unknown_symbols)
+            )
         _record_phase(phase_timings_ms, "preliminary_ranking", phase_started)
 
         phase_started = time.perf_counter()
@@ -291,7 +303,17 @@ async def run_scan(
                 bad_data=bad_data,
             )
         _record_phase(phase_timings_ms, "snapshot_finalize", phase_started)
-        log.info("equity_scan_prior_day_changes_loaded symbols=%d", len(prior_day_changes))
+        known_prior_day = sum(snap.prior_day_pct is not None for snap in snapshots)
+        log.info(
+            "equity_scan_prior_day_coverage known=%d unavailable=%d matched=%d",
+            known_prior_day, len(snapshots) - known_prior_day, len(snapshots),
+        )
+        if in_premarket and known_prior_day < len(snapshots):
+            log.warning(
+                "equity_scan_prior_day_incomplete unavailable=%d",
+                len(snapshots) - known_prior_day,
+            )
+        log.info("equity_scan_prior_day_changes_loaded symbols=%d", known_prior_day)
 
         news_symbols = _news_candidate_symbols(snapshots, limit=scan_config.news.max_symbols)
         phase_started = time.perf_counter()

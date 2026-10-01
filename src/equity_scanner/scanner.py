@@ -42,7 +42,7 @@ class EquitySnapshot:
     symbol: str
     price: float
     prior_close: float
-    prior_day_pct: float
+    prior_day_pct: float | None
     session_gap_pct: float
     volume: int
     premarket_volume: int
@@ -217,6 +217,11 @@ def parse_equity_quote(
             return None
     if prior_day_pct_override is not None:
         prior_day_pct = prior_day_pct_override
+    elif in_premarket:
+        # A live quote percentage includes today's premarket trades. Only saved
+        # closes or completed daily history establish yesterday's move.
+        prior_day_pct = None
+        flags.append("prior_day_unavailable")
     if reference_price and max_reference_price_deviation_pct is not None:
         reference_deviation_pct = abs(price - reference_price) / reference_price * 100.0
         if reference_deviation_pct > max_reference_price_deviation_pct:
@@ -292,7 +297,7 @@ def passes_filters(snapshot: EquitySnapshot, settings: EquityScanSettings) -> bo
         return False
     if filters.max_abs_pct is not None:
         cap = filters.max_abs_pct
-        if abs(snapshot.prior_day_pct) > cap or abs(snapshot.session_gap_pct) > cap:
+        if abs(snapshot.prior_day_pct or 0.0) > cap or abs(snapshot.session_gap_pct) > cap:
             return False
     return True
 
@@ -459,7 +464,10 @@ def _focus_reasons(
     filters = settings.filters
     reasons: list[str] = []
     gap_ok = abs(gap_pct) >= filters.premarket_min_gap_pct
-    prior_ok = abs(snapshot.prior_day_pct) >= filters.prior_day_min_pct
+    prior_ok = (
+        snapshot.prior_day_pct is not None
+        and abs(snapshot.prior_day_pct) >= filters.prior_day_min_pct
+    )
     if gap_ok and _has_focus_volume(snapshot, settings):
         reasons.append("gap with volume")
     if prior_ok and gap_ok and snapshot.prior_day_pct * gap_pct > 0:
@@ -492,7 +500,10 @@ def rank_opening_focus(
     for snapshot in snapshots:
         if (
             abs(gaps[snapshot.symbol]) >= settings.filters.premarket_min_gap_pct
-            or abs(snapshot.prior_day_pct) >= settings.filters.prior_day_min_pct
+            or (
+                snapshot.prior_day_pct is not None
+                and abs(snapshot.prior_day_pct) >= settings.filters.prior_day_min_pct
+            )
         ):
             sector_counts[snapshot.sector] = sector_counts.get(snapshot.sector, 0) + 1
 
@@ -511,7 +522,7 @@ def rank_opening_focus(
         news_score = snapshot.news.score if snapshot.news is not None else 0.0
         score = (
             abs(gap_pct) * 2.0
-            + abs(snapshot.prior_day_pct)
+            + abs(snapshot.prior_day_pct or 0.0)
             + rvol_score
             + custom_score
             + index_score
@@ -533,7 +544,7 @@ def rank_catalyst_watch(
         key=lambda snap: (
             snap.news.score if snap.news is not None else 0.0,
             abs(snap.session_gap_pct),
-            abs(snap.prior_day_pct),
+            abs(snap.prior_day_pct or 0.0),
         ),
         reverse=True,
     )[: settings.limits.catalyst_watch]
@@ -550,7 +561,8 @@ def _top(
     filtered = [
         snap
         for snap in snapshots
-        if (getattr(snap, key) >= min_abs_pct if reverse else getattr(snap, key) <= -min_abs_pct)
+        if getattr(snap, key) is not None
+        and (getattr(snap, key) >= min_abs_pct if reverse else getattr(snap, key) <= -min_abs_pct)
     ]
     return sorted(filtered, key=lambda snap: getattr(snap, key), reverse=reverse)[:limit]
 

@@ -268,7 +268,10 @@ async def test_mocked_twenty_batch_scan_archives_complete_coverage(
     assert sum(attempts.values()) == 20
 
 
-async def test_premarket_scan_finds_yesterdays_mover_from_stored_closes(monkeypatch, tmp_path):
+@pytest.mark.parametrize("saved_closes", [True, False])
+async def test_premarket_scan_finds_yesterdays_mover_from_stored_closes(
+    monkeypatch, tmp_path, saved_closes
+):
     """A stock that rallied yesterday but is flat premarket has netPercentChange ~0
     before the open; the stored morning closes must still rank it as a prior gainer,
     and liquid_meta must supply its 20d average volume without a history request."""
@@ -278,9 +281,10 @@ async def test_premarket_scan_finds_yesterdays_mover_from_stored_closes(monkeypa
     closes_dir = tmp_path / "closes"
     closes_dir.mkdir()
     # Captured Friday morning: Thursday's closes.
-    (closes_dir / "2026-09-25.json").write_text(
-        json.dumps({"date": "2026-09-25", "closes": {"FLAT": 100.0, "QUIET": 50.0}})
-    )
+    if saved_closes:
+        (closes_dir / "2026-09-25.json").write_text(
+            json.dumps({"date": "2026-09-25", "closes": {"FLAT": 100.0, "QUIET": 50.0}})
+        )
     (tmp_path / "liquid_meta.json").write_text(
         json.dumps({"FLAT": {"price": 100.0, "avg_volume_20d": 2_000_000, "exchange": "NYSE"}})
     )
@@ -385,11 +389,18 @@ async def test_premarket_scan_finds_yesterdays_mover_from_stored_closes(monkeypa
     await run.run_scan(scan_config_path="unused.yaml", dry_run=True)
 
     payload = json.loads((tmp_path / "reports" / "2026-09-28.json").read_text())
-    [gainer] = payload["prior_gainers"]
-    assert gainer["symbol"] == "FLAT"
-    assert gainer["prior_day_pct"] == pytest.approx(8.0)
-    assert gainer["avg_volume_20d"] == 2_000_000
-    assert gainer["premarket_volume"] == 20_000
+    if saved_closes:
+        [gainer] = payload["prior_gainers"]
+        assert gainer["symbol"] == "FLAT"
+        assert gainer["prior_day_pct"] == pytest.approx(8.0)
+        assert gainer["avg_volume_20d"] == 2_000_000
+        assert gainer["premarket_volume"] == 20_000
+    else:
+        assert payload["prior_gainers"] == []
+        assert payload["prior_losers"] == []
+        for item in payload["opening_focus"]:
+            assert item["snapshot"]["prior_day_pct"] is None
+        assert "prior unavailable" in (tmp_path / "reports" / "2026-09-28.md").read_text()
     assert payload["premarket_gainers"] == []  # flat premarket, below min_rvol anyway
     assert payload["matched_symbols"] == 2
     # QUIET's average comes from history (custom, no liquid_meta); FLAT's history is only the

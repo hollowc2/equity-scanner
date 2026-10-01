@@ -311,7 +311,7 @@ def test_stale_quote_is_visible_as_data_quality_flag() -> None:
     )
 
     assert len(snapshots) == 1
-    assert snapshots[0].data_quality_flags == ("gateway_stale",)
+    assert snapshots[0].data_quality_flags == ("gateway_stale", "prior_day_unavailable")
 
 
 def test_prior_day_ranking_membership_depends_on_current_quote_volume() -> None:
@@ -545,3 +545,30 @@ def test_opening_focus_uses_regular_move_after_the_open() -> None:
 
     assert [item.snapshot.symbol for item in results.opening_focus] == ["RUNNER"]
     assert "continuation setup" in results.opening_focus[0].reasons
+
+
+@pytest.mark.parametrize("known_change", [None, 0.0, -4.0])
+def test_missing_prior_day_never_uses_live_gap(known_change):
+    from equity_scanner.report import build_report
+
+    settings = EquityScanSettings(filters={"min_volume": 0, "min_rvol": 0.05})
+    snapshots = build_snapshots(
+        {"AAPL": QUOTES["AAPL"]}, {"AAPL": {"sp500"}}, settings,
+        avg_volumes={"AAPL": 500_000}, in_premarket=True,
+        generated_at=PREMARKET_AT,
+        prior_day_changes={} if known_change is None else {"AAPL": known_change},
+    )
+    assert snapshots[0].prior_day_pct == known_change
+    assert snapshots[0].session_gap_pct == 8.0
+    results = rank_scan_results(
+        snapshots, settings=settings, movers_up=[], movers_down=[],
+        market_context=[], scanned_symbols=1, generated_at=PREMARKET_AT,
+    )
+    assert results.prior_gainers == []
+    assert bool(results.prior_losers) == (known_change == -4.0)
+    assert [s.symbol for s in results.premarket_gainers] == ["AAPL"]
+    reasons = results.opening_focus[0].reasons
+    assert "continuation setup" not in reasons
+    assert ("fade risk" in reasons) == (known_change == -4.0)
+    if known_change is None:
+        assert "prior unavailable" in "\n".join(build_report(results, settings=settings))

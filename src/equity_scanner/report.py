@@ -33,7 +33,9 @@ _SECTOR_SHORT = {
 }
 
 
-def _fmt_pct(value: float) -> str:
+def _fmt_pct(value: float | None) -> str:
+    if value is None:
+        return "unavailable"
     sign = "+" if value >= 0 else ""
     return f"{sign}{value:.1f}%"
 
