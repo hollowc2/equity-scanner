@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal
 
 from schwab_gateway_sdk import GatewayMarketDataClient, QuoteV1
@@ -20,6 +20,10 @@ from schwab_gateway_sdk.client import (
 )
 
 log = logging.getLogger(__name__)
+
+# Above this share of failed quote batches the gateway itself is unhealthy, not a
+# symbol, so isolating unquotable symbols is not attempted.
+MAX_FAILED_BATCH_FRACTION = 0.1
 
 
 def _gateway_symbol(symbol: str) -> str:
@@ -55,6 +59,8 @@ class QuoteCoverage:
     max_concurrency: int
     complete: bool
     verdict: Literal["complete", "incomplete"]
+    # Symbols dropped after bisecting a failed batch down to them alone.
+    isolated_symbols: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -181,6 +187,95 @@ class GatewayEquityDataProvider:
         *,
         batch_size: int = 100,
         concurrency: int = 4,
+        max_unquotable_symbols: int = 0,
+    ) -> QuoteCollection:
+        """Collect quote batches; optionally survive a few symbols the upstream rejects.
+
+        The gateway fails a whole batch when Schwab omits one symbol (e.g. a delisted
+        or renamed ticker), and retries cannot fix that. With
+        ``max_unquotable_symbols`` > 0, each failed batch is bisected until the
+        failures are single symbols, which are dropped and reported in
+        ``coverage.isolated_symbols``. Many failed batches mean the gateway itself is
+        unhealthy, so the original error is raised; more than
+        ``max_unquotable_symbols`` isolated symbols raises RuntimeError.
+        """
+        try:
+            return await self._collect_quote_batches(
+                symbols, batch_size=batch_size, concurrency=concurrency
+            )
+        except Exception as exc:
+            collection = getattr(exc, "quote_collection", None)
+            if max_unquotable_symbols < 1 or collection is None:
+                raise
+            coverage = collection.coverage
+            allowed = max(1, int(coverage.initial_call_count * MAX_FAILED_BATCH_FRACTION))
+            if coverage.failed_batch_count > allowed:
+                raise
+
+        quotes = dict(collection.quotes)
+        isolated: list[str] = []
+        for failure in coverage.failed_batches:
+            log.warning(
+                "gateway_quote_batch_isolating batch_id=%d symbol_count=%d error_type=%s",
+                failure.batch_index,
+                len(failure.symbols),
+                failure.error_type,
+            )
+            await self._isolate_failed_batch(
+                list(failure.symbols), quotes, isolated, max_unquotable_symbols
+            )
+
+        requested = coverage.requested_symbols
+        returned = tuple(symbol for symbol in requested if symbol in quotes)
+        unavailable = tuple(symbol for symbol in requested if symbol not in quotes)
+        stale = tuple(symbol for symbol in requested if symbol in quotes and quotes[symbol].stale)
+        coverage = replace(
+            coverage,
+            returned_count=len(returned),
+            returned_symbols=returned,
+            stale_retained_count=len(stale),
+            stale_retained_symbols=stale,
+            unavailable_count=len(unavailable),
+            unavailable_symbols=unavailable,
+            isolated_symbols=tuple(isolated),
+        )
+        log.info(
+            "gateway_quote_coverage_after_isolation returned=%d unavailable=%d isolated=%s",
+            coverage.returned_count,
+            coverage.unavailable_count,
+            ",".join(isolated),
+        )
+        return QuoteCollection(quotes=quotes, coverage=coverage)
+
+    async def _isolate_failed_batch(
+        self,
+        symbols: list[str],
+        quotes: dict[str, QuoteV1],
+        isolated: list[str],
+        max_unquotable_symbols: int,
+    ) -> None:
+        """Split a failing batch in halves until each failure is a single symbol."""
+        if len(symbols) == 1:
+            isolated.append(symbols[0])
+            log.warning("gateway_quote_symbol_unquotable symbol=%s", symbols[0])
+            if len(isolated) > max_unquotable_symbols:
+                raise RuntimeError(
+                    f"more than {max_unquotable_symbols} symbols failed to quote"
+                )
+            return
+        middle = len(symbols) // 2
+        for half in (symbols[:middle], symbols[middle:]):
+            try:
+                quotes.update(await self.get_equity_quotes(half, batch_size=len(half)))
+            except Exception:
+                await self._isolate_failed_batch(half, quotes, isolated, max_unquotable_symbols)
+
+    async def _collect_quote_batches(
+        self,
+        symbols: list[str],
+        *,
+        batch_size: int,
+        concurrency: int,
     ) -> QuoteCollection:
         """Collect bounded quote batches and retain auditable coverage evidence.
 
