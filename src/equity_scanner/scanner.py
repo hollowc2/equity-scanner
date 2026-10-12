@@ -38,6 +38,27 @@ FOCUS_MIN_RVOL = 0.05
 # News can lift a name in Opening Focus by at most this much; the full score still
 # orders Catalyst Watch.
 FOCUS_NEWS_SCORE_CAP = 10.0
+# Gateway flags for a quote that has not updated recently.
+STALE_FLAGS = frozenset({"stale", "gateway_stale"})
+# At most this many Opening Focus names are marked as headline setups.
+FOCUS_HEADLINE_LIMIT = 3
+# Liquid-only names carry their exchange and NQ-only names "Nasdaq-100" as their
+# sector; only real GICS sectors can form a sector cluster.
+GICS_SECTORS = frozenset(
+    {
+        "Communication Services",
+        "Consumer Discretionary",
+        "Consumer Staples",
+        "Energy",
+        "Financials",
+        "Health Care",
+        "Industrials",
+        "Information Technology",
+        "Materials",
+        "Real Estate",
+        "Utilities",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -66,6 +87,7 @@ class OpeningFocusItem:
     snapshot: EquitySnapshot
     score: float
     reasons: tuple[str, ...]
+    headline: bool = False
 
 
 @dataclass(frozen=True)
@@ -471,8 +493,8 @@ def _focus_reasons(
     # itself; otherwise every name in an active sector qualifies.
     if (
         (gap_ok or prior_ok)
+        and snapshot.sector in GICS_SECTORS
         and sector_counts.get(snapshot.sector, 0) >= 2
-        and snapshot.sector != "Unknown"
     ):
         reasons.append("sector cluster")
     if snapshot.news is not None and snapshot.news.score >= settings.news.min_score_for_focus:
@@ -527,7 +549,35 @@ def rank_opening_focus(
             + news_score
         )
         items.append(OpeningFocusItem(snapshot=snapshot, score=score, reasons=reasons))
-    return sorted(items, key=lambda item: item.score, reverse=True)[: settings.limits.opening_focus]
+    ranked = sorted(items, key=lambda item: item.score, reverse=True)[
+        : settings.limits.opening_focus
+    ]
+    return _mark_headlines(ranked, settings)
+
+
+def _mark_headlines(
+    items: list[OpeningFocusItem], settings: EquityScanSettings
+) -> list[OpeningFocusItem]:
+    """Mark the top setups backed by real volume, a fresh quote, and a reason of
+    their own.
+
+    A sector cluster alone does not make a headline: it says the sector moves, not
+    that this name has a setup."""
+    marked: list[OpeningFocusItem] = []
+    remaining = FOCUS_HEADLINE_LIMIT
+    for item in items:
+        own_reasons = [reason for reason in item.reasons if reason != "sector cluster"]
+        stale = STALE_FLAGS & set(item.snapshot.data_quality_flags)
+        if (
+            remaining
+            and own_reasons
+            and not stale
+            and _has_focus_volume(item.snapshot, settings)
+        ):
+            item = replace(item, headline=True)
+            remaining -= 1
+        marked.append(item)
+    return marked
 
 
 def rank_catalyst_watch(

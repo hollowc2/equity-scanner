@@ -13,6 +13,8 @@ from typing import Any
 from equity_scanner.files import atomic_write_text
 from equity_scanner.scan_config import EquityScanSettings
 from equity_scanner.scanner import (
+    GICS_SECTORS,
+    STALE_FLAGS,
     EquitySnapshot,
     MarketContext,
     OpeningFocusItem,
@@ -23,6 +25,10 @@ from equity_scanner.scanner import (
 from equity_scanner.time_utils import EASTERN
 
 DISCORD_CHAR_LIMIT = 1900
+
+# Nearly every scanned name is in the liquid universe, so its tag carries no signal.
+_QUIET_UNIVERSES = frozenset({"liquid"})
+_OTHER_SECTOR = "Other"
 
 _UNIVERSE_LABELS = {
     "sp500": "S&P",
@@ -61,9 +67,13 @@ def _fmt_volume(volume: int) -> str:
 
 
 def _fmt_universes(snapshot: EquitySnapshot) -> str:
-    if not snapshot.universes:
+    labels = [
+        _UNIVERSE_LABELS.get(tag, tag)
+        for tag in snapshot.universes
+        if tag not in _QUIET_UNIVERSES
+    ]
+    if not labels:
         return ""
-    labels = [_UNIVERSE_LABELS.get(tag, tag) for tag in snapshot.universes]
     return f" · {'+'.join(labels)}"
 
 
@@ -77,9 +87,16 @@ def _fmt_rvol(snapshot: EquitySnapshot) -> str:
     return f" · {label}RVOL {value}x"
 
 
-def _fmt_quality(snapshot: EquitySnapshot) -> str:
-    if snapshot.data_quality_flags:
-        return " · flags " + ",".join(snapshot.data_quality_flags)
+def _fmt_quality(snapshot: EquitySnapshot, *, show_stale: bool = True) -> str:
+    """Data-quality flags, with the gateway's two stale flags collapsed into one.
+
+    Yesterday's lists hide staleness: a name that has not traded premarket is
+    expected there and does not change yesterday's move."""
+    flags = [flag for flag in snapshot.data_quality_flags if flag not in STALE_FLAGS]
+    if show_stale and STALE_FLAGS & set(snapshot.data_quality_flags):
+        flags.insert(0, "stale")
+    if flags:
+        return " · ⚠ " + ",".join(flags)
     return ""
 
 
@@ -96,14 +113,30 @@ def _direction_emoji(pct: float) -> str:
     return "🟢" if pct >= 0 else "🔴"
 
 
-def _format_snapshot_line(snapshot: EquitySnapshot, *, pct_field: str) -> str:
+def _format_snapshot_line(
+    snapshot: EquitySnapshot, *, pct_field: str, headlines: frozenset[str]
+) -> str:
     pct = getattr(snapshot, pct_field)
+    star = " ⭐" if snapshot.symbol in headlines else ""
     return (
-        f"{_direction_emoji(pct)} **{snapshot.symbol}** **{_fmt_pct(pct)}** "
+        f"{_direction_emoji(pct)} **{snapshot.symbol}** **{_fmt_pct(pct)}**{star} "
         f"@ {_fmt_price(snapshot.price)} · {_fmt_volume(snapshot.volume)} vol"
         f"{_fmt_rvol(snapshot)}{_fmt_news(snapshot)}{_fmt_universes(snapshot)}"
-        f"{_fmt_quality(snapshot)}"
+        f"{_fmt_quality(snapshot, show_stale=pct_field != 'prior_day_pct')}"
     )
+
+
+def _format_headline_lines(item: OpeningFocusItem) -> list[str]:
+    """A headline setup: the move and volume up front, the why on a subtext line."""
+    snapshot = item.snapshot
+    reasons = ", ".join(item.reasons)
+    return [
+        f"{_direction_emoji(snapshot.session_gap_pct)} **{snapshot.symbol}  "
+        f"{_fmt_pct(snapshot.session_gap_pct)}** gap @ {_fmt_price(snapshot.price)} · "
+        f"{_fmt_volume(snapshot.premarket_volume)} pm vol{_fmt_rvol(snapshot)}"
+        f"{_fmt_universes(snapshot)}{_fmt_quality(snapshot)}",
+        f"-# ↳ {reasons} · prior {_fmt_pct(snapshot.prior_day_pct)}{_fmt_news(snapshot)}",
+    ]
 
 
 def _format_focus_line(item: OpeningFocusItem) -> str:
@@ -133,6 +166,11 @@ def _sector_label(sector: str) -> str:
     return _SECTOR_SHORT.get(sector, sector)
 
 
+def _sector_group(sector: str) -> str:
+    """GICS sectors group by name; exchange and index fallbacks share one group."""
+    return sector if sector in GICS_SECTORS else _OTHER_SECTOR
+
+
 def _format_sector_header(sector: str, count: int) -> str:
     label = _sector_label(sector).upper()
     return f"▸ __**{label}**__ · {count}"
@@ -143,11 +181,11 @@ def _group_snapshots_by_sector(
 ) -> list[tuple[str, list[EquitySnapshot]]]:
     grouped: dict[str, list[EquitySnapshot]] = {}
     for snapshot in snapshots:
-        grouped.setdefault(snapshot.sector, []).append(snapshot)
+        grouped.setdefault(_sector_group(snapshot.sector), []).append(snapshot)
 
-    known = sorted(sector for sector in grouped if sector != "Unknown")
-    if "Unknown" in grouped:
-        known.append("Unknown")
+    known = sorted(sector for sector in grouped if sector != _OTHER_SECTOR)
+    if _OTHER_SECTOR in grouped:
+        known.append(_OTHER_SECTOR)
     return [(sector, grouped[sector]) for sector in known]
 
 
@@ -158,21 +196,27 @@ def _format_snapshot_section(
     pct_field: str,
     empty_text: str,
     group_by_sector: bool,
+    headlines: frozenset[str],
 ) -> str:
     if not snapshots:
         return _format_section(title, [], empty_text=empty_text)
 
-    if not group_by_sector:
-        lines = [_format_snapshot_line(snapshot, pct_field=pct_field) for snapshot in snapshots]
+    groups = _group_snapshots_by_sector(snapshots)
+    if not group_by_sector or [sector for sector, _ in groups] == [_OTHER_SECTOR]:
+        lines = [
+            _format_snapshot_line(snapshot, pct_field=pct_field, headlines=headlines)
+            for snapshot in snapshots
+        ]
         return _format_section(title, lines, empty_text=empty_text)
 
     lines: list[str] = []
-    for sector, sector_snapshots in _group_snapshots_by_sector(snapshots):
+    for sector, sector_snapshots in groups:
         if lines:
             lines.append("")
         lines.append(_format_sector_header(sector, len(sector_snapshots)))
         lines.extend(
-            _format_snapshot_line(snapshot, pct_field=pct_field) for snapshot in sector_snapshots
+            _format_snapshot_line(snapshot, pct_field=pct_field, headlines=headlines)
+            for snapshot in sector_snapshots
         )
     return _format_section(title, lines, empty_text=empty_text)
 
@@ -233,7 +277,7 @@ def _format_bad_data(results: ScanResults) -> str:
     rejected = {reason: count for reason, count in rejected.items() if reason != "filter_failed"}
     bad_data = results.bad_data or []
     if not rejected and not bad_data:
-        return "_No quote sanity rejects._"
+        return ""
     counts = ", ".join(f"{reason}: {count}" for reason, count in sorted(rejected.items()))
     examples = [f"{item.get('symbol', '?')} {item.get('reason', '?')}" for item in bad_data[:5]]
     suffix = f" · examples: {', '.join(examples)}" if examples else ""
@@ -249,11 +293,11 @@ def _format_header(
     universe_labels = [_UNIVERSE_LABELS.get(u, u) for u in settings.universes]
     tape = _format_market_context(results.market_context)
     return (
-        f"📈 **Morning Equity Scan** · {ts.strftime('%a %b %d')} · "
-        f"{ts.strftime('%I:%M %p').lstrip('0')} ET\n"
+        f"## 📈 Morning Equity Scan · {ts.strftime('%a %b %d')}\n"
         f"**Tape:** {tape}\n"
-        f"_Scanned {results.scanned_symbols:,} names ({', '.join(universe_labels)}) "
-        f"· {results.matched_symbols:,} passed filters_"
+        f"-# {ts.strftime('%I:%M %p').lstrip('0')} ET · "
+        f"scanned {results.scanned_symbols:,} names ({', '.join(universe_labels)}) "
+        f"· {results.matched_symbols:,} passed filters"
     )
 
 
@@ -269,14 +313,26 @@ def build_report(
 
     sections: list[str] = []
     group_by_sector = settings.group_by_sector
+    top = [item for item in results.opening_focus if item.headline]
+    rest = [item for item in results.opening_focus if not item.headline]
+    headlines = frozenset(item.snapshot.symbol for item in top)
 
-    sections.append(
-        _format_section(
-            f"**🎯 Opening Focus** ({len(results.opening_focus)})",
-            [_format_focus_line(item) for item in results.opening_focus],
-            empty_text="_No focused opening setups cleared the scan._",
+    if top:
+        sections.append(
+            _format_section(
+                "### ⭐ Top Setups",
+                [line for item in top for line in _format_headline_lines(item)],
+                empty_text="",
+            )
         )
-    )
+    if rest or not top:
+        sections.append(
+            _format_section(
+                f"**🎯 Opening Focus** ({len(rest)})",
+                [_format_focus_line(item) for item in rest],
+                empty_text="_No focused opening setups cleared the scan._",
+            )
+        )
 
     sections.append(
         _format_section(
@@ -294,6 +350,7 @@ def build_report(
             pct_field="prior_day_pct",
             empty_text="_Nothing cleared the rally threshold._",
             group_by_sector=group_by_sector,
+            headlines=headlines,
         )
     )
     sections.append(
@@ -303,6 +360,7 @@ def build_report(
             pct_field="prior_day_pct",
             empty_text="_Nothing cleared the selloff threshold._",
             group_by_sector=group_by_sector,
+            headlines=headlines,
         )
     )
 
@@ -315,6 +373,7 @@ def build_report(
                 pct_field="session_gap_pct",
                 empty_text="_No meaningful gap-ups yet._",
                 group_by_sector=group_by_sector,
+                headlines=headlines,
             )
         )
         sections.append(
@@ -324,6 +383,7 @@ def build_report(
                 pct_field="session_gap_pct",
                 empty_text="_No meaningful gap-downs yet._",
                 group_by_sector=group_by_sector,
+                headlines=headlines,
             )
         )
     else:
@@ -355,14 +415,8 @@ def build_report(
         )
 
     quote_sanity = _format_bad_data(results)
-    if quote_sanity != "_No quote sanity rejects._":
-        sections.append(
-            _format_section(
-                "**🧪 Quote Sanity**",
-                [quote_sanity],
-                empty_text="_No quote sanity rejects._",
-            )
-        )
+    if quote_sanity:
+        sections.append(f"-# 🧪 Quote sanity: {quote_sanity}")
 
     messages: list[str] = []
     current = header
