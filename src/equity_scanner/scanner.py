@@ -35,6 +35,9 @@ INDEX_UNIVERSES = frozenset({"sp500", "nq100"})
 # Opening Focus never treats premarket volume below this share of 20d avg volume as
 # real, even when filters.min_rvol is 0.
 FOCUS_MIN_RVOL = 0.05
+# News can lift a name in Opening Focus by at most this much; the full score still
+# orders Catalyst Watch.
+FOCUS_NEWS_SCORE_CAP = 10.0
 
 
 @dataclass(frozen=True)
@@ -478,8 +481,6 @@ def _focus_reasons(
         reasons.append("custom watchlist")
     if sector_counts.get(snapshot.sector, 0) >= 2 and snapshot.sector != "Unknown":
         reasons.append("sector cluster")
-    if snapshot.data_quality_flags:
-        reasons.append("data flag")
     if snapshot.news is not None and snapshot.news.score >= settings.news.min_score_for_focus:
         reasons.append("news catalyst")
     return tuple(reasons)
@@ -519,7 +520,9 @@ def rank_opening_focus(
         custom_score = 6.0 if "custom" in snapshot.universes else 0.0
         index_score = 2.0 if INDEX_UNIVERSES & set(snapshot.universes) else 0.0
         sector_score = 3.0 if "sector cluster" in reasons else 0.0
-        news_score = snapshot.news.score if snapshot.news is not None else 0.0
+        news_score = (
+            min(snapshot.news.score, FOCUS_NEWS_SCORE_CAP) if snapshot.news is not None else 0.0
+        )
         score = (
             abs(gap_pct) * 2.0
             + abs(snapshot.prior_day_pct or 0.0)
