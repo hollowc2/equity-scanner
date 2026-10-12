@@ -11,6 +11,7 @@ import csv
 import datetime as dt
 import logging
 import os
+import re
 from dataclasses import dataclass, replace
 from io import StringIO
 from typing import Any
@@ -28,6 +29,35 @@ log = logging.getLogger(__name__)
 
 EXTRA_ITEM_BONUS = 0.5
 MAX_BONUS_ITEMS = 4
+
+
+class AlphaVantageLimitError(RuntimeError):
+    """Alpha Vantage answered 200 with a rate-limit or error note instead of data."""
+
+
+def _error_summary(exc: BaseException) -> str:
+    """Error type (and HTTP status) only: httpx messages embed the request URL, and
+    Alpha Vantage URLs carry the API key."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"{type(exc).__name__} status={exc.response.status_code}"
+    return type(exc).__name__
+
+
+class AlphaVantageNoteError(RuntimeError):
+    """Alpha Vantage answered 200 with an error note (e.g. an unknown ticker)."""
+
+
+_ALPHA_LIMIT_NOTE = re.compile(r"rate limit|call frequency|per day|premium", re.IGNORECASE)
+
+
+def _raise_for_alpha_note(payload: Any) -> None:
+    if isinstance(payload, dict):
+        for key in ("Note", "Information", "Error Message"):
+            if key in payload:
+                note = str(payload[key])[:120]
+                if _ALPHA_LIMIT_NOTE.search(note):
+                    raise AlphaVantageLimitError(note)
+                raise AlphaVantageNoteError(note)
 
 
 class _RequestStartLimiter:
@@ -123,11 +153,16 @@ def _sec_form_score(form: str) -> float:
     return 2.0
 
 
+def _normalize_news_symbol(symbol: str) -> str:
+    """SEC and Alpha Vantage write class shares with a dash (BRK-B)."""
+    return symbol.upper().replace(".", "-")
+
+
 def _select_news_symbols(symbols: list[str], limit: int) -> list[str]:
     selected: list[str] = []
     seen: set[str] = set()
     for symbol in symbols:
-        normalized = symbol.upper().replace(".", "-")
+        normalized = _normalize_news_symbol(symbol)
         if normalized in seen:
             continue
         seen.add(normalized)
@@ -200,12 +235,14 @@ async def _fetch_sec_impacts(
     *,
     settings: EquityNewsSettings,
     generated_at: dt.datetime | None,
+    user_agent: str | None = None,
 ) -> dict[str, NewsImpact]:
     if "sec" not in settings.providers:
         return {}
 
     headers = {
-        "User-Agent": os.getenv(settings.sec_user_agent_env, settings.sec_user_agent),
+        "User-Agent": user_agent
+        or os.getenv(settings.sec_user_agent_env, settings.sec_user_agent),
         "Accept-Encoding": "gzip, deflate",
     }
     today = _today(generated_at)
@@ -216,7 +253,7 @@ async def _fetch_sec_impacts(
         try:
             ticker_map = await _load_sec_ticker_map(client)
         except Exception as exc:
-            log.warning("sec_ticker_map_fetch_failed error=%s", exc)
+            log.warning("sec_ticker_map_fetch_failed error=%s", _error_summary(exc))
             return {}
         sem = asyncio.Semaphore(settings.sec_request_concurrency)
         limiter = _RequestStartLimiter(settings.sec_request_interval_seconds)
@@ -230,7 +267,9 @@ async def _fetch_sec_impacts(
                 try:
                     payload = await _fetch_json(client, SEC_SUBMISSIONS_URL.format(cik=cik))
                 except Exception as exc:
-                    log.warning("sec_news_fetch_failed symbol=%s error=%s", symbol, exc)
+                    log.warning(
+                        "sec_news_fetch_failed symbol=%s error=%s", symbol, _error_summary(exc)
+                    )
                     return
                 impact = _recent_sec_filings(
                     symbol,
@@ -269,6 +308,9 @@ async def _fetch_alpha_earnings(
         },
     )
     response.raise_for_status()
+    if response.text.lstrip().startswith("{"):
+        _raise_for_alpha_note(response.json())
+        return {}
 
     impacts: dict[str, NewsImpact] = {}
     for row in csv.DictReader(StringIO(response.text)):
@@ -312,6 +354,7 @@ async def _fetch_alpha_news_for_symbol(
     )
     response.raise_for_status()
     payload = response.json()
+    _raise_for_alpha_note(payload)
     feed = payload.get("feed") or []
 
     impact: NewsImpact | None = None
@@ -358,10 +401,11 @@ async def _fetch_alpha_impacts(
     *,
     settings: EquityNewsSettings,
     generated_at: dt.datetime | None,
+    api_key: str | None = None,
 ) -> dict[str, NewsImpact]:
     if "alpha_vantage" not in settings.providers:
         return {}
-    api_key = _alpha_key(settings)
+    api_key = (api_key or "").strip() or _alpha_key(settings)
     if api_key is None:
         log.info("alpha_vantage_news_skipped reason=missing_api_key")
         return {}
@@ -369,6 +413,19 @@ async def _fetch_alpha_impacts(
     selected = symbols[: settings.alpha_vantage_max_news_symbols]
     timeout = httpx.Timeout(settings.request_timeout_seconds)
     impacts: dict[str, NewsImpact] = {}
+    limited = False
+
+    def _note_failure(event: str, exc: Exception, symbol: str | None = None) -> None:
+        nonlocal limited
+        if isinstance(exc, AlphaVantageLimitError):
+            # Further calls only burn quota; the daily allowance is small.
+            if not limited:
+                log.warning("alpha_vantage_limited note=%s", exc)
+            limited = True
+            return
+        target = f" symbol={symbol}" if symbol else ""
+        log.warning("%s%s error=%s", event, target, _error_summary(exc))
+
     async with httpx.AsyncClient(timeout=timeout) as client:
         try:
             impacts.update(
@@ -381,12 +438,14 @@ async def _fetch_alpha_impacts(
                 )
             )
         except Exception as exc:
-            log.warning("alpha_vantage_earnings_failed error=%s", exc)
+            _note_failure("alpha_vantage_earnings_failed", exc)
 
         sem = asyncio.Semaphore(settings.alpha_vantage_request_concurrency)
 
         async def _fetch_one(symbol: str) -> None:
             async with sem:
+                if limited:
+                    return
                 try:
                     impact = await _fetch_alpha_news_for_symbol(
                         client,
@@ -395,7 +454,7 @@ async def _fetch_alpha_impacts(
                         api_key=api_key,
                     )
                 except Exception as exc:
-                    log.warning("alpha_vantage_news_failed symbol=%s error=%s", symbol, exc)
+                    _note_failure("alpha_vantage_news_failed", exc, symbol)
                     return
                 if impact is not None:
                     impacts[symbol] = _merge_impact(
@@ -435,24 +494,43 @@ async def fetch_news_impacts(
     *,
     settings: EquityNewsSettings,
     generated_at: dt.datetime | None = None,
+    sec_user_agent: str | None = None,
+    alpha_vantage_api_key: str | None = None,
 ) -> dict[str, NewsImpact]:
-    """Fetch recent/coming catalyst signals from free data sources."""
+    """Fetch recent/coming catalyst signals from free data sources.
+
+    Results are keyed by the caller's symbols (e.g. BRK.B), not the providers'
+    dash form. Credentials passed here win over the configured environment names."""
     if not settings.enabled:
         return {}
 
     selected = _select_news_symbols(symbols, settings.max_symbols)
     if not selected:
         return {}
+    original = {}
+    for symbol in symbols:
+        original.setdefault(_normalize_news_symbol(symbol), symbol)
 
     sec_impacts, alpha_impacts = await asyncio.gather(
-        _fetch_sec_impacts(selected, settings=settings, generated_at=generated_at),
-        _fetch_alpha_impacts(selected, settings=settings, generated_at=generated_at),
+        _fetch_sec_impacts(
+            selected, settings=settings, generated_at=generated_at, user_agent=sec_user_agent
+        ),
+        _fetch_alpha_impacts(
+            selected,
+            settings=settings,
+            generated_at=generated_at,
+            api_key=alpha_vantage_api_key,
+        ),
         return_exceptions=True,
     )
     if isinstance(sec_impacts, Exception):
-        log.warning("sec_news_provider_failed error=%s", sec_impacts)
+        log.warning("sec_news_provider_failed error=%s", _error_summary(sec_impacts))
         sec_impacts = {}
     if isinstance(alpha_impacts, Exception):
-        log.warning("alpha_vantage_provider_failed error=%s", alpha_impacts)
+        log.warning("alpha_vantage_provider_failed error=%s", _error_summary(alpha_impacts))
         alpha_impacts = {}
-    return merge_news_impacts(sec_impacts, alpha_impacts)
+    merged = merge_news_impacts(sec_impacts, alpha_impacts)
+    return {
+        original.get(symbol, symbol): replace(impact, symbol=original.get(symbol, symbol))
+        for symbol, impact in merged.items()
+    }

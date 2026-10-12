@@ -13,7 +13,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
-import os
 import time
 from dataclasses import asdict, replace
 
@@ -108,13 +107,6 @@ async def run_scan(
     phase_started = time.perf_counter()
     app_settings = AppSettings()
     scan_config = load_equity_scan_config(scan_config_path)
-    if app_settings.sec_user_agent:
-        os.environ.setdefault(scan_config.news.sec_user_agent_env, app_settings.sec_user_agent)
-    if app_settings.alpha_vantage_api_key:
-        os.environ.setdefault(
-            scan_config.news.alpha_vantage_api_key_env,
-            app_settings.alpha_vantage_api_key.get_secret_value(),
-        )
     if open_scan:
         scan_config.include_movers = True
 
@@ -328,6 +320,12 @@ async def run_scan(
             news_symbols,
             settings=scan_config.news,
             generated_at=generated_at,
+            sec_user_agent=app_settings.sec_user_agent,
+            alpha_vantage_api_key=(
+                app_settings.alpha_vantage_api_key.get_secret_value()
+                if app_settings.alpha_vantage_api_key
+                else None
+            ),
         )
         _record_phase(phase_timings_ms, "news", phase_started)
         snapshots = attach_news_impacts(snapshots, news_impacts)

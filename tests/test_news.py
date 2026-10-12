@@ -225,3 +225,126 @@ async def test_alpha_news_score_is_bounded_for_a_long_feed():
         )
     assert impact is not None
     assert impact.score == 5.0 + 4 * 0.5
+
+
+def _alpha_settings(**kwargs) -> EquityNewsSettings:
+    return EquityNewsSettings(providers=["alpha_vantage"], **kwargs)
+
+
+async def test_alpha_rate_limit_stops_further_calls_and_never_logs_key(monkeypatch, caplog):
+    calls: list[str] = []
+    limit_note = {"Information": "We have detected your API key as ... rate limit is 25 per day."}
+
+    def handler(request):
+        calls.append(request.url.params["function"])
+        return httpx.Response(200, json=limit_note)
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        news.httpx,
+        "AsyncClient",
+        lambda **kwargs: real_client(transport=httpx.MockTransport(handler), **kwargs),
+    )
+    impacts = await news._fetch_alpha_impacts(
+        ["AAA", "BBB", "CCC"],
+        settings=_alpha_settings(alpha_vantage_request_concurrency=1),
+        generated_at=None,
+        api_key="SECRET-KEY",
+    )
+
+    assert impacts == {}
+    assert calls == ["EARNINGS_CALENDAR"]
+    assert "alpha_vantage_limited" in caplog.text
+    assert "SECRET-KEY" not in caplog.text
+
+
+async def test_alpha_http_errors_log_status_without_url(monkeypatch, caplog):
+    def handler(request):
+        if request.url.params["function"] == "EARNINGS_CALENDAR":
+            return httpx.Response(200, text="symbol,reportDate\n")
+        return httpx.Response(503)
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        news.httpx,
+        "AsyncClient",
+        lambda **kwargs: real_client(transport=httpx.MockTransport(handler), **kwargs),
+    )
+    await news._fetch_alpha_impacts(
+        ["AAA"], settings=_alpha_settings(), generated_at=None, api_key="SECRET-KEY"
+    )
+
+    assert "alpha_vantage_news_failed symbol=AAA error=HTTPStatusError status=503" in caplog.text
+    assert "SECRET-KEY" not in caplog.text
+
+
+async def test_unknown_ticker_note_does_not_stop_other_symbols(monkeypatch):
+    article = {
+        "title": "Real headline",
+        "topics": [],
+        "ticker_sentiment": [{"ticker": "BBB", "relevance_score": "0.9"}],
+    }
+
+    def handler(request):
+        params = request.url.params
+        if params["function"] == "EARNINGS_CALENDAR":
+            return httpx.Response(200, text="symbol,reportDate\n")
+        if params["tickers"] == "AAA":
+            return httpx.Response(200, json={"Information": "Invalid inputs."})
+        return httpx.Response(200, json={"feed": [article]})
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        news.httpx,
+        "AsyncClient",
+        lambda **kwargs: real_client(transport=httpx.MockTransport(handler), **kwargs),
+    )
+    impacts = await news._fetch_alpha_impacts(
+        ["AAA", "BBB"],
+        settings=_alpha_settings(alpha_vantage_request_concurrency=1),
+        generated_at=None,
+        api_key="k",
+    )
+    assert list(impacts) == ["BBB"]
+
+
+async def test_news_impacts_are_keyed_by_caller_class_share_symbols(monkeypatch):
+    seen: list[list[str]] = []
+
+    async def fake_sec(symbols, **_kwargs):
+        seen.append(symbols)
+        return {"BRK-B": NewsImpact(symbol="BRK-B", score=6.0, providers=("sec",))}
+
+    async def fake_alpha(_symbols, **_kwargs):
+        return {}
+
+    monkeypatch.setattr(news, "_fetch_sec_impacts", fake_sec)
+    monkeypatch.setattr(news, "_fetch_alpha_impacts", fake_alpha)
+
+    impacts = await news.fetch_news_impacts(["BRK.B", "AAPL"], settings=EquityNewsSettings())
+
+    assert seen == [["BRK-B", "AAPL"]]
+    assert list(impacts) == ["BRK.B"]
+    assert impacts["BRK.B"].symbol == "BRK.B"
+
+
+async def test_explicit_credentials_win_over_environment(monkeypatch):
+    received: dict[str, str | None] = {}
+
+    async def fake_sec(_symbols, *, user_agent=None, **_kwargs):
+        received["user_agent"] = user_agent
+        return {}
+
+    async def fake_alpha(_symbols, *, api_key=None, **_kwargs):
+        received["api_key"] = api_key
+        return {}
+
+    monkeypatch.setattr(news, "_fetch_sec_impacts", fake_sec)
+    monkeypatch.setattr(news, "_fetch_alpha_impacts", fake_alpha)
+    await news.fetch_news_impacts(
+        ["AAPL"],
+        settings=EquityNewsSettings(),
+        sec_user_agent="ua@example.com",
+        alpha_vantage_api_key="k",
+    )
+    assert received == {"user_agent": "ua@example.com", "api_key": "k"}
