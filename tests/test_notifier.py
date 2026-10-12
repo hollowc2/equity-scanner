@@ -1,11 +1,10 @@
-"""Tests for the ported Discord notifier subset (_post/notify_messages only —
-see notifier.py's module docstring). Mirrors ButterflyGuy's own DiscordNotifier
-tests: patch `_post` rather than mocking aiohttp internals directly."""
+"""Tests for the Discord webhook notifier."""
 
 from __future__ import annotations
 
 from unittest.mock import patch
 
+import httpx
 import pytest
 
 from equity_scanner import notifier as notifier_module
@@ -35,31 +34,28 @@ async def test_notify_messages_skips_all_blank_messages():
         await notifier.notify_messages(["", "   ", "\n"])
 
 
-@pytest.mark.parametrize("status", [200, 204, 429, 500])
-async def test_notification_http_failure_propagates_without_logging_webhook(
-    monkeypatch, caplog, status
-):
-    class Response:
-        async def __aenter__(self):
-            self.status = status
-            return self
+def _sender(handler, **kwargs) -> DiscordNotifier:
+    return DiscordNotifier(
+        "https://example.invalid/private-webhook",
+        transport=httpx.MockTransport(handler),
+        **kwargs,
+    )
 
-        async def __aexit__(self, *_args):
-            return None
 
-    class Session:
-        async def __aenter__(self):
-            return self
+@pytest.fixture(autouse=True)
+def no_sleep(monkeypatch):
+    slept: list[float] = []
 
-        async def __aexit__(self, *_args):
-            return None
+    async def fake_sleep(seconds):
+        slept.append(seconds)
 
-        def post(self, url, **kwargs):
-            assert isinstance(url, str)
-            return Response()
+    monkeypatch.setattr(notifier_module.asyncio, "sleep", fake_sleep)
+    return slept
 
-    monkeypatch.setattr(notifier_module.aiohttp, "ClientSession", Session)
-    sender = DiscordNotifier("https://example.invalid/private-webhook")
+
+@pytest.mark.parametrize("status", [200, 204, 400, 500])
+async def test_notification_http_failure_propagates_without_logging_webhook(caplog, status):
+    sender = _sender(lambda request: httpx.Response(status))
     if status in (200, 204):
         await sender.notify_messages(["report"])
     else:
@@ -68,20 +64,60 @@ async def test_notification_http_failure_propagates_without_logging_webhook(
     assert "private-webhook" not in caplog.text
 
 
-async def test_notification_transport_error_does_not_expose_url(monkeypatch, caplog):
-    class Session:
-        async def __aenter__(self):
-            return self
+async def test_notification_transport_error_does_not_expose_url(caplog):
+    def handler(request):
+        raise httpx.ReadError("failed URL " + str(request.url))
 
-        async def __aexit__(self, *_args):
-            return None
-
-        def post(self, url, **kwargs):
-            raise ValueError("failed URL " + url)
-
-    monkeypatch.setattr(notifier_module.aiohttp, "ClientSession", Session)
-    sender = DiscordNotifier("https://example.invalid/private-webhook")
     with pytest.raises(RuntimeError, match="Discord notification failed") as failure:
-        await sender.notify_messages(["report"])
+        await _sender(handler).notify_messages(["report"])
     assert "private-webhook" not in caplog.text
     assert "private-webhook" not in str(failure.value)
+
+
+async def test_rate_limit_waits_for_retry_after_then_posts(no_sleep):
+    responses = iter(
+        [httpx.Response(429, json={"retry_after": 1.5}), httpx.Response(204), httpx.Response(204)]
+    )
+    bodies: list[bytes] = []
+
+    def handler(request):
+        bodies.append(request.content)
+        return next(responses)
+
+    await _sender(handler).notify_messages(["one", "two"])
+
+    assert no_sleep == [1.5]
+    assert len(bodies) == 3
+    assert bodies[0] == bodies[1]
+
+
+async def test_persistent_rate_limit_reports_partial_delivery():
+    responses = iter([httpx.Response(204)] + [httpx.Response(429, json={"retry_after": 0})] * 3)
+    with pytest.raises(RuntimeError, match="after 1 of 2 messages"):
+        await _sender(lambda request: next(responses)).notify_messages(["one", "two"])
+
+
+async def test_connect_error_is_retried():
+    attempts = iter([httpx.ConnectError("down"), httpx.Response(204)])
+
+    def handler(request):
+        result = next(attempts)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    await _sender(handler).notify_messages(["one"])
+
+
+async def test_one_client_serves_every_message(monkeypatch):
+    created = 0
+    real_client = httpx.AsyncClient
+
+    def counting_client(**kwargs):
+        nonlocal created
+        created += 1
+        return real_client(**kwargs)
+
+    monkeypatch.setattr(notifier_module.httpx, "AsyncClient", counting_client)
+    await _sender(lambda request: httpx.Response(204)).notify_messages(["a", "b", "c"])
+    assert created == 1
