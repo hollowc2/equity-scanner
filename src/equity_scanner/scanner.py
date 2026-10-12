@@ -467,7 +467,13 @@ def _focus_reasons(
         reasons.append("fade risk")
     if "custom" in snapshot.universes and (gap_ok or prior_ok):
         reasons.append("custom watchlist")
-    if sector_counts.get(snapshot.sector, 0) >= 2 and snapshot.sector != "Unknown":
+    # Like the watchlist reason, a cluster only counts for a name that is moving
+    # itself; otherwise every name in an active sector qualifies.
+    if (
+        (gap_ok or prior_ok)
+        and sector_counts.get(snapshot.sector, 0) >= 2
+        and snapshot.sector != "Unknown"
+    ):
         reasons.append("sector cluster")
     if snapshot.news is not None and snapshot.news.score >= settings.news.min_score_for_focus:
         reasons.append("news catalyst")
