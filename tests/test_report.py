@@ -8,11 +8,13 @@ import datetime as dt
 import json
 from dataclasses import asdict
 
+import pytest
 from schwab_gateway_sdk import QuoteV1
 
 from equity_scanner.news import NewsImpact
 from equity_scanner.provider import QuoteBatchFailure, QuoteCoverage
 from equity_scanner.report import (
+    _fmt_rvol,
     _format_market_context,
     archive_report,
     archive_report_json,
@@ -20,12 +22,26 @@ from equity_scanner.report import (
 )
 from equity_scanner.scan_config import EquityScanSettings
 from equity_scanner.scanner import (
+    EquitySnapshot,
     MarketContext,
     attach_news_impacts,
     parse_equity_quote,
     rank_scan_results,
 )
 from equity_scanner.time_utils import EASTERN
+
+
+@pytest.mark.parametrize(
+    ("rvol", "expected"),
+    [(0.03, "0.03x"), (0.001, "<0.01x"), (0.0, "0.00x"), (0.7, "0.7x"), (1.2, "🔥RVOL 1.2x")],
+)
+def test_rvol_format_preserves_small_positive_volume(rvol, expected):
+    snapshot = EquitySnapshot(
+        symbol="TEST", price=100, prior_close=100, prior_day_pct=0,
+        session_gap_pct=0, volume=3000, premarket_volume=3000,
+        avg_volume_20d=100000, rvol=rvol, sector="Unknown", universes=(),
+    )
+    assert expected in _fmt_rvol(snapshot)
 
 
 def _premarket_et() -> dt.datetime:

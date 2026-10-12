@@ -1,8 +1,10 @@
 import datetime as dt
 from zoneinfo import ZoneInfo
 
+import pytest
 from schwab_gateway_sdk import QuoteV1
 
+from equity_scanner.time_utils import now_eastern
 from equity_scanner.volume import (
     avg_daily_volume,
     compute_rvol,
@@ -12,12 +14,12 @@ from equity_scanner.volume import (
     symbols_needing_rvol_fetch,
 )
 
-TODAY = dt.date.today()
+TODAY = now_eastern().date()
 
 
 def _ms(days_ago: int) -> int:
     day = TODAY - dt.timedelta(days=days_ago)
-    return int(dt.datetime.combine(day, dt.time(16, 0)).timestamp() * 1000)
+    return int(dt.datetime.combine(day, dt.time(16, 0), tzinfo=EASTERN).timestamp() * 1000)
 
 
 class FakeProvider:
@@ -147,3 +149,33 @@ async def test_fetch_prior_day_changes_uses_provider_per_symbol() -> None:
 
     assert result == {"AAPL": 3.0}
     assert provider.calls == [("AAPL", 30)]
+
+
+def test_completed_history_uses_requested_eastern_session_date() -> None:
+    # 03:30 UTC still belongs to the previous Eastern date; 04:00 is today's
+    # midnight daily bar. This also remains deterministic when replayed later.
+    def candle(hour, minute, close, volume):
+        at = dt.datetime(2026, 10, 2, hour, minute, tzinfo=dt.timezone.utc)
+        return {"datetime": int(at.timestamp() * 1000), "close": close, "volume": volume}
+
+    candles = [candle(2, 0, 100, 100), candle(3, 30, 110, 200), candle(4, 0, 999, 900)]
+    session_date = dt.date(2026, 10, 2)
+
+    assert avg_daily_volume(candles, lookback=2, session_date=session_date) == 150
+    assert prior_session_pct_change(candles, session_date=session_date) == 10
+
+
+@pytest.mark.parametrize("fetch", [fetch_avg_volumes, fetch_prior_day_changes])
+async def test_history_fetch_logs_missing_data_and_safe_errors(fetch, caplog) -> None:
+    class HistoryProvider:
+        async def get_daily_bars(self, symbol, days_back=None):
+            if symbol == "FAILED":
+                raise TimeoutError("sensitive exception detail must not be logged")
+            return []
+
+    result = await fetch(HistoryProvider(), ["FAILED", "EMPTY"])
+
+    assert result == {}
+    assert "symbol=FAILED error_type=TimeoutError" in caplog.text
+    assert "symbol=EMPTY reason=insufficient" in caplog.text
+    assert "sensitive exception detail" not in caplog.text
