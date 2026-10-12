@@ -52,6 +52,10 @@ from equity_scanner.volume import (
 
 log = logging.getLogger("equity_scanner.run")
 
+# A ticker Schwab stops quoting (delisted/renamed) fails its whole gateway batch.
+# Drop up to this many such symbols instead of skipping the morning scan.
+MAX_UNQUOTABLE_SCAN_SYMBOLS = 10
+
 
 def _record_phase(
     timings: dict[str, float],
@@ -144,6 +148,7 @@ async def run_scan(
             symbols,
             batch_size=scan_config.batch_size,
             concurrency=scan_config.quote_fetch_concurrency,
+            max_unquotable_symbols=MAX_UNQUOTABLE_SCAN_SYMBOLS,
         )
         quotes = quote_collection.quotes
         quote_coverage = asdict(quote_collection.coverage)

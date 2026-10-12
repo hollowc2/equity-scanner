@@ -83,7 +83,9 @@ async def test_run_scan_persists_phase_timings_with_fake_boundaries(
             *,
             batch_size=100,
             concurrency=4,
+            max_unquotable_symbols=0,
         ):
+            assert max_unquotable_symbols == run.MAX_UNQUOTABLE_SCAN_SYMBOLS
             quotes = await self.get_equity_quotes(symbols, batch_size=batch_size)
             ordered = tuple(dict.fromkeys(symbols))
             return QuoteCollection(

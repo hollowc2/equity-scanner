@@ -10,6 +10,7 @@ from schwab_gateway_sdk.client import (
     GatewayCapacityError,
     GatewayResponseError,
     GatewayTimeoutError,
+    GatewayUnavailableError,
 )
 
 from equity_scanner.config import AppSettings
@@ -252,6 +253,76 @@ async def test_strict_mode_preserves_exception_type_and_completed_evidence() -> 
     collection = caught.value.quote_collection
     assert collection.coverage.returned_count == 1
     assert collection.coverage.unavailable_count == 100
+
+
+def _rejecting(rejected: set[str], requests: list[list[str]]):
+    """Gateway behavior seen live for PSKY: Schwab omits a symbol, the gateway 502s."""
+
+    def handler(request):
+        symbols = request.url.params["symbols"].split(",")
+        requests.append(symbols)
+        if rejected & set(symbols):
+            return httpx.Response(502, json={"detail": "upstream unavailable"})
+        return httpx.Response(
+            200,
+            json={"schema_version": "1.0", "quotes": [quote(s) for s in symbols]},
+        )
+
+    return handler
+
+
+async def test_unquotable_symbol_is_isolated_instead_of_failing_collection() -> None:
+    requests: list[list[str]] = []
+    symbols = [f"S{i:03d}" for i in range(300)]
+    http, provider = await _provider(_rejecting({"S150"}, requests), max_attempts=1)
+    try:
+        collection = await provider.get_equity_quote_collection(
+            symbols, max_unquotable_symbols=10
+        )
+    finally:
+        await http.aclose()
+
+    assert set(collection.quotes) == set(symbols) - {"S150"}
+    coverage = collection.coverage
+    assert coverage.isolated_symbols == ("S150",)
+    assert coverage.unavailable_symbols == ("S150",)
+    assert coverage.returned_count == 299
+    assert coverage.failed_batch_count == 1
+    assert coverage.verdict == "incomplete"
+    # 3 initial batches, then the failed 100 is bisected (100/50/25/12/6/3): 2 calls each.
+    assert len(requests) == 3 + 12
+
+
+async def test_isolation_is_opt_in() -> None:
+    http, provider = await _provider(_rejecting({"S5"}, []), max_attempts=1)
+    try:
+        with pytest.raises(GatewayUnavailableError):
+            await provider.get_equity_quote_collection([f"S{i}" for i in range(10)])
+    finally:
+        await http.aclose()
+
+
+async def test_isolation_gives_up_when_gateway_looks_unhealthy() -> None:
+    # 2 of 10 batches failing exceeds the 10% bound: not a bad symbol, a bad gateway.
+    http, provider = await _provider(_rejecting({"S01", "S05"}, []), max_attempts=1)
+    try:
+        with pytest.raises(GatewayUnavailableError):
+            await provider.get_equity_quote_collection(
+                [f"S{i:02d}" for i in range(40)], batch_size=4, max_unquotable_symbols=10
+            )
+    finally:
+        await http.aclose()
+
+
+async def test_isolation_gives_up_past_the_unquotable_limit() -> None:
+    http, provider = await _provider(_rejecting({"S04", "S05"}, []), max_attempts=1)
+    try:
+        with pytest.raises(RuntimeError, match="failed to quote"):
+            await provider.get_equity_quote_collection(
+                [f"S{i:02d}" for i in range(40)], batch_size=4, max_unquotable_symbols=1
+            )
+    finally:
+        await http.aclose()
 
 
 async def test_cancelling_collection_cleans_up_all_concurrent_tasks() -> None:
