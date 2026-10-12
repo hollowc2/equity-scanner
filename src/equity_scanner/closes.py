@@ -12,12 +12,11 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
-import os
-import tempfile
 from pathlib import Path
 
 from schwab_gateway_sdk import QuoteV1
 
+from equity_scanner.files import atomic_write_text
 from equity_scanner.time_utils import EASTERN, MARKET_OPEN, is_trading_day
 
 log = logging.getLogger(__name__)
@@ -58,19 +57,13 @@ def record_closes(
         return None
     # The file for trading day D holds the closes of the session before D.
     path = _closes_path(closes_dir, now.date())
-    path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "date": now.date().isoformat(),
         "session_closed": previous_trading_day(now.date()).isoformat(),
         "captured_at": now.isoformat(),
         "closes": closes,
     }
-    with tempfile.NamedTemporaryFile(
-        "w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", delete=False
-    ) as handle:
-        json.dump(payload, handle, indent=1, sort_keys=True)
-        handle.write("\n")
-    os.replace(handle.name, path)
+    atomic_write_text(path, json.dumps(payload, indent=1, sort_keys=True) + "\n")
     return path
 
 

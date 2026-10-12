@@ -10,8 +10,16 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+from equity_scanner.files import atomic_write_text
 from equity_scanner.scan_config import EquityScanSettings
-from equity_scanner.scanner import EquitySnapshot, MarketContext, OpeningFocusItem, ScanResults
+from equity_scanner.scanner import (
+    EquitySnapshot,
+    MarketContext,
+    OpeningFocusItem,
+    ScanResults,
+    mover_change_pct,
+    mover_symbol,
+)
 from equity_scanner.time_utils import EASTERN
 
 DISCORD_CHAR_LIMIT = 1900
@@ -216,15 +224,8 @@ def _format_market_context(context: list[MarketContext]) -> str:
 
 
 def _format_mover_item(item: dict[str, Any]) -> str:
-    symbol = str(item.get("symbol") or item.get("ticker") or "?")
-    pct = item.get("changePercent") or item.get("netPercentChange")
-    if pct is None:
-        pct = item.get("change") or item.get("netChange") or 0
-    try:
-        pct_value = float(pct)
-    except (TypeError, ValueError):
-        pct_value = 0.0
-    return f"{_direction_emoji(pct_value)} **{symbol}** {_fmt_pct(pct_value)}"
+    pct = mover_change_pct(item)
+    return f"{_direction_emoji(pct or 0.0)} **{mover_symbol(item)}** {_fmt_pct(pct)}"
 
 
 def _format_bad_data(results: ScanResults) -> str:
@@ -385,10 +386,8 @@ def archive_report(
     generated_at: dt.datetime,
 ) -> Path:
     """Write the scan report to a dated markdown file under report_dir."""
-    out_dir = Path(report_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / f"{generated_at.strftime('%Y-%m-%d')}.md"
-    path.write_text("\n\n---\n\n".join(messages) + "\n")
+    path = Path(report_dir) / f"{generated_at.strftime('%Y-%m-%d')}.md"
+    atomic_write_text(path, "\n\n---\n\n".join(messages) + "\n")
     return path
 
 
@@ -399,10 +398,8 @@ def archive_report_json(
     generated_at: dt.datetime,
 ) -> Path:
     """Write machine-readable scan internals next to the markdown report."""
-    out_dir = Path(report_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / f"{generated_at.strftime('%Y-%m-%d')}.json"
+    path = Path(report_dir) / f"{generated_at.strftime('%Y-%m-%d')}.json"
     payload = asdict(results)
     payload["generated_at"] = generated_at.isoformat()
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    atomic_write_text(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
     return path

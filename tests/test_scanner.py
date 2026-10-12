@@ -639,3 +639,11 @@ def test_opening_focus_ignores_data_flags_and_caps_news() -> None:
     assert "FLAGGED" not in order
     assert order[0] == "HEAVY"
     assert [snap.symbol for snap in results.catalyst_watch] == ["JUNK"]
+
+
+def test_mover_change_keeps_zero_and_never_uses_dollar_change() -> None:
+    from equity_scanner.scanner import mover_change_pct
+
+    assert mover_change_pct({"changePercent": 0.0, "change": 3.5}) == 0.0
+    assert mover_change_pct({"netPercentChange": "2.5"}) == 2.5
+    assert mover_change_pct({"change": 3.5}) is None
