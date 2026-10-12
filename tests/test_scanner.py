@@ -647,3 +647,42 @@ def test_mover_change_keeps_zero_and_never_uses_dollar_change() -> None:
     assert mover_change_pct({"changePercent": 0.0, "change": 3.5}) == 0.0
     assert mover_change_pct({"netPercentChange": "2.5"}) == 2.5
     assert mover_change_pct({"change": 3.5}) is None
+
+
+def test_sector_cluster_needs_the_name_itself_to_move() -> None:
+    settings = EquityScanSettings(filters={"min_rvol": 0.0})
+    after_open = dt.datetime(2026, 6, 8, 10, 0, tzinfo=PREMARKET_AT.tzinfo)
+
+    def quote(close: float, last: float) -> QuoteV1:
+        return _quote(
+            session="regular",
+            close=close,
+            last=last,
+            net_percent_change=(last - close) / close * 100.0,
+            volume=1_000_000,
+            event_timestamp=after_open,
+        )
+
+    quotes = {"UP1": quote(50.0, 53.0), "UP2": quote(20.0, 21.0), "FLAT": quote(30.0, 30.0)}
+    snapshots = build_snapshots(
+        quotes,
+        {symbol: {"liquid"} for symbol in quotes},
+        settings,
+        avg_volumes={symbol: 5_000_000.0 for symbol in quotes},
+        sector_map={symbol: "Energy" for symbol in quotes},
+        prior_day_changes={symbol: 0.0 for symbol in quotes},
+        generated_at=after_open,
+    )
+    results = rank_scan_results(
+        snapshots,
+        settings=settings,
+        movers_up=[],
+        movers_down=[],
+        market_context=[],
+        scanned_symbols=len(quotes),
+        generated_at=after_open,
+    )
+
+    focus = {item.snapshot.symbol: item.reasons for item in results.opening_focus}
+    assert "FLAT" not in focus
+    assert "sector cluster" in focus["UP1"]
