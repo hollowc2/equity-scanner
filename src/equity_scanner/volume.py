@@ -1,17 +1,24 @@
 """Relative-volume helpers, ported from ButterflyGuy's equity_scan/volume.py to run
-against a GatewayEquityDataProvider instead of SchwabClientWrapper. The pure functions
-(avg_daily_volume, prior_session_pct_change, compute_rvol, symbols_needing_rvol_fetch)
-are unchanged — they only operate on the candle-dict shape, not the client."""
+against a GatewayEquityDataProvider. Completed sessions are selected using the
+scan's Eastern session date; missing history is logged without exception details."""
 
 from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import logging
 from typing import Protocol
 
 from schwab_gateway_sdk import QuoteV1
 
-from equity_scanner.time_utils import EASTERN
+from equity_scanner.time_utils import EASTERN, now_eastern
+
+log = logging.getLogger(__name__)
+
+
+def _session_start_ms(session_date: dt.date | None) -> int:
+    day = session_date or now_eastern().date()
+    return int(dt.datetime.combine(day, dt.time.min, tzinfo=EASTERN).timestamp() * 1000)
 
 
 class DailyBarsProvider(Protocol):
@@ -25,14 +32,14 @@ def _as_int(value: object) -> int:
         return 0
 
 
-def avg_daily_volume(candles: list[dict], *, lookback: int = 20) -> float | None:
+def avg_daily_volume(
+    candles: list[dict], *, lookback: int = 20, session_date: dt.date | None = None
+) -> float | None:
     """Average daily volume from completed sessions (excludes today)."""
     if not candles or lookback <= 0:
         return None
 
-    today_start_ms = int(
-        dt.datetime.combine(dt.date.today(), dt.time.min).timestamp() * 1000
-    )
+    today_start_ms = _session_start_ms(session_date)
     volumes = [
         _as_int(candle.get("volume"))
         for candle in candles
@@ -48,14 +55,14 @@ def avg_daily_volume(candles: list[dict], *, lookback: int = 20) -> float | None
     return sum(recent) / len(recent)
 
 
-def prior_session_pct_change(candles: list[dict]) -> float | None:
+def prior_session_pct_change(
+    candles: list[dict], *, session_date: dt.date | None = None
+) -> float | None:
     """Close-to-close percent change for the last completed daily session."""
     if not candles:
         return None
 
-    today_start_ms = int(
-        dt.datetime.combine(dt.date.today(), dt.time.min).timestamp() * 1000
-    )
+    today_start_ms = _session_start_ms(session_date)
     completed = [
         candle
         for candle in candles
@@ -134,6 +141,7 @@ async def fetch_avg_volumes(
     *,
     lookback_days: int = 20,
     concurrency: int = 10,
+    session_date: dt.date | None = None,
 ) -> dict[str, float]:
     """Fetch 20-day average daily volume for each symbol."""
     if not symbols:
@@ -141,15 +149,28 @@ async def fetch_avg_volumes(
 
     sem = asyncio.Semaphore(concurrency)
     results: dict[str, float] = {}
+    session_date = session_date or now_eastern().date()
 
     async def _fetch_one(symbol: str) -> None:
         async with sem:
             try:
                 candles = await provider.get_daily_bars(symbol, days_back=lookback_days)
-                avg = avg_daily_volume(candles, lookback=lookback_days)
+                avg = avg_daily_volume(
+                    candles, lookback=lookback_days, session_date=session_date
+                )
                 if avg is not None:
                     results[symbol] = avg
-            except Exception:
+                else:
+                    log.warning(
+                        "equity_scan_avg_volume_unavailable symbol=%s "
+                        "reason=insufficient_completed_volume_bars bars=%d lookback=%d",
+                        symbol, len(candles), lookback_days,
+                    )
+            except Exception as exc:
+                log.warning(
+                    "equity_scan_avg_volume_fetch_failed symbol=%s error_type=%s",
+                    symbol, type(exc).__name__,
+                )
                 return
 
     await asyncio.gather(*(_fetch_one(symbol) for symbol in symbols))
@@ -162,6 +183,7 @@ async def fetch_prior_day_changes(
     *,
     concurrency: int = 10,
     days_back: int | None = 20,
+    session_date: dt.date | None = None,
 ) -> dict[str, float]:
     """Fetch true prior-session close-to-close percent changes."""
     if not symbols:
@@ -169,15 +191,26 @@ async def fetch_prior_day_changes(
 
     sem = asyncio.Semaphore(concurrency)
     results: dict[str, float] = {}
+    session_date = session_date or now_eastern().date()
 
     async def _fetch_one(symbol: str) -> None:
         async with sem:
             try:
                 candles = await provider.get_daily_bars(symbol, days_back=days_back)
-                pct = prior_session_pct_change(candles)
+                pct = prior_session_pct_change(candles, session_date=session_date)
                 if pct is not None:
                     results[symbol] = pct
-            except Exception:
+                else:
+                    log.warning(
+                        "equity_scan_prior_day_unavailable symbol=%s "
+                        "reason=insufficient_valid_completed_closes bars=%d",
+                        symbol, len(candles),
+                    )
+            except Exception as exc:
+                log.warning(
+                    "equity_scan_prior_day_fetch_failed symbol=%s error_type=%s",
+                    symbol, type(exc).__name__,
+                )
                 return
 
     await asyncio.gather(*(_fetch_one(symbol) for symbol in symbols))

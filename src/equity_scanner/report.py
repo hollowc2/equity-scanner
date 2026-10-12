@@ -63,7 +63,10 @@ def _fmt_rvol(snapshot: EquitySnapshot) -> str:
     if snapshot.rvol is None:
         return ""
     label = "🔥" if snapshot.rvol >= 1.0 else ""
-    return f" · {label}RVOL {snapshot.rvol:.1f}x"
+    value = f"{snapshot.rvol:.2f}" if snapshot.rvol < 0.1 else f"{snapshot.rvol:.1f}"
+    if 0 < snapshot.rvol < 0.005:
+        value = "<0.01"
+    return f" · {label}RVOL {value}x"
 
 
 def _fmt_quality(snapshot: EquitySnapshot) -> str:

@@ -1,5 +1,5 @@
-"""Market-hours helpers, trimmed from ButterflyGuy's core/time_utils.py to just what
-scanner.py needs: is_premarket_window and is_market_open."""
+"""NYSE market-hours helpers: trading days, holidays, early closes, and the
+premarket/regular session windows."""
 
 from __future__ import annotations
 
@@ -11,11 +11,6 @@ EASTERN = ZoneInfo("America/New_York")
 MARKET_OPEN = dt.time(9, 30)
 MARKET_CLOSE = dt.time(16, 0)
 EARLY_CLOSE = dt.time(13, 0)
-
-EARLY_CLOSES_2026 = {
-    dt.date(2026, 11, 27),  # NYSE day after Thanksgiving
-    dt.date(2026, 12, 24),  # NYSE Christmas Eve
-}
 
 
 def _observed_date(holiday: dt.date) -> dt.date:
@@ -61,7 +56,6 @@ def _easter_sunday(year: int) -> dt.date:
 
 def get_us_market_holidays(year: int) -> set[dt.date]:
     holidays = {
-        _observed_date(dt.date(year, 1, 1)),
         _observed_date(dt.date(year, 7, 4)),
         _observed_date(dt.date(year, 12, 25)),
         _nth_weekday(year, 1, 0, 3),
@@ -71,18 +65,25 @@ def get_us_market_holidays(year: int) -> set[dt.date]:
         _nth_weekday(year, 11, 3, 4),
         _easter_sunday(year) - dt.timedelta(days=2),
     }
+    # NYSE does not move New Year's Day back to Friday Dec 31 when it falls on a
+    # Saturday; that Friday is a normal trading day.
+    new_year = dt.date(year, 1, 1)
+    if new_year.weekday() != 5:
+        holidays.add(_observed_date(new_year))
     if year >= 2022:
         holidays.add(_observed_date(dt.date(year, 6, 19)))
-    next_nyny = _observed_date(dt.date(year + 1, 1, 1))
-    if next_nyny.year == year:
-        holidays.add(next_nyny)
     return holidays
 
 
 def get_us_market_early_closes(year: int) -> set[dt.date]:
-    if year == 2026:
-        return set(EARLY_CLOSES_2026)
-    return set()
+    """13:00 ET closes: day after Thanksgiving, and July 3 / Dec 24 when they are
+    weekdays that are not themselves the observed holiday."""
+    holidays = get_us_market_holidays(year)
+    closes = {_nth_weekday(year, 11, 3, 4) + dt.timedelta(days=1)}
+    for candidate in (dt.date(year, 7, 3), dt.date(year, 12, 24)):
+        if candidate.weekday() < 5 and candidate not in holidays:
+            closes.add(candidate)
+    return closes
 
 
 def now_eastern() -> dt.datetime:

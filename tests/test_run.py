@@ -126,6 +126,11 @@ async def test_run_scan_persists_phase_timings_with_fake_boundaries(
                     "close": 105.0,
                     "volume": 1_100_000,
                 },
+                {
+                    "datetime": int(generated_at.timestamp() * 1000),
+                    "close": 999.0,
+                    "volume": 9_000_000,
+                },
             ]
 
     settings = EquityScanSettings(
@@ -135,6 +140,7 @@ async def test_run_scan_persists_phase_timings_with_fake_boundaries(
         report_dir=str(tmp_path / "reports"),
         context_symbols=["SPY"],
         filters={"min_rvol": 0.0},
+        rvol_lookback_days=2,
         news={"enabled": False},
     )
     monkeypatch.setattr(run, "now_eastern", lambda: generated_at)
@@ -159,6 +165,9 @@ async def test_run_scan_persists_phase_timings_with_fake_boundaries(
     assert posted == ([] if dry_run else messages)
 
     payload = json.loads((tmp_path / "reports" / "2026-08-26.json").read_text())
+    snapshot = payload["opening_focus"][0]["snapshot"]
+    assert snapshot["prior_day_pct"] == 5.0
+    assert snapshot["avg_volume_20d"] == 1_050_000
     timings = payload["phase_timings_ms"]
     assert messages
     assert {

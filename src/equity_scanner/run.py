@@ -210,6 +210,7 @@ async def run_scan(
             avg_volume_targets,
             lookback_days=scan_config.rvol_lookback_days,
             concurrency=scan_config.rvol_fetch_concurrency,
+            session_date=generated_at.date(),
         )
         avg_volumes.update(fetched_avg_volumes)
         log.info("equity_scan_rvol_loaded symbols_with_avg_volume=%d", len(avg_volumes))
@@ -280,6 +281,7 @@ async def run_scan(
             prior_day_symbols,
             concurrency=scan_config.rvol_fetch_concurrency,
             days_back=scan_config.rvol_lookback_days,
+            session_date=generated_at.date(),
         )
         _record_phase(phase_timings_ms, "prior_day_history", phase_started)
 
