@@ -14,7 +14,7 @@ import json
 import pytest
 from schwab_gateway_sdk import QuoteV1
 
-from equity_scanner import universes
+from equity_scanner import files, universes
 
 NASDAQ_SAMPLE = """\
 Symbol|Security Name|Market Category|Test Issue|Financial Status|Round Lot Size|ETF|NextShares
@@ -210,7 +210,7 @@ def test_atomic_universe_write_preserves_existing_file_if_replace_fails(
     def fail_replace(_source, _destination):
         raise OSError("simulated replace failure")
 
-    monkeypatch.setattr(universes.os, "replace", fail_replace)
+    monkeypatch.setattr(files.os, "replace", fail_replace)
 
     with pytest.raises(OSError, match="simulated replace failure"):
         universes.write_universe_file(path, ["AAPL", "MSFT"])

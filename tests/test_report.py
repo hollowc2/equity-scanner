@@ -297,3 +297,20 @@ def test_format_market_context_orders_priority_symbols_deterministically():
         "**$SPX** +0.3% · **SPY** +0.5% · **QQQ** +0.2% · **$COMPX** +0.4% · "
         "**$DJI** +0.1% · **AAPL** +0.6%"
     )
+
+
+def test_archives_are_replaced_atomically(tmp_path, monkeypatch):
+    from equity_scanner import files
+
+    generated_at = _premarket_et()
+    path = archive_report(["old"], report_dir=str(tmp_path), generated_at=generated_at)
+
+    def fail_replace(_source, _destination):
+        raise OSError("simulated crash")
+
+    monkeypatch.setattr(files.os, "replace", fail_replace)
+    with pytest.raises(OSError):
+        archive_report(["new"], report_dir=str(tmp_path), generated_at=generated_at)
+
+    assert path.read_text() == "old\n"
+    assert list(tmp_path.iterdir()) == [path]

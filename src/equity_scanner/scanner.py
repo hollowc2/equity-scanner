@@ -29,7 +29,7 @@ from schwab_gateway_sdk import QuoteV1
 from equity_scanner.news import NewsImpact
 from equity_scanner.scan_config import EquityScanSettings
 from equity_scanner.time_utils import is_market_open, is_premarket_window
-from equity_scanner.volume import todays_premarket_volume
+from equity_scanner.volume import compute_rvol, todays_premarket_volume
 
 INDEX_UNIVERSES = frozenset({"sp500", "nq100"})
 # Opening Focus never treats premarket volume below this share of 20d avg volume as
@@ -254,7 +254,7 @@ def parse_equity_quote(
     )
     if in_premarket and quote.session == "extended" and volume <= 0:
         flags.append("extended_price_without_volume")
-    rvol = _compute_rvol(premarket_volume, avg_volume_20d)
+    rvol = compute_rvol(premarket_volume, avg_volume_20d)
 
     return EquitySnapshot(
         symbol=symbol,
@@ -274,12 +274,6 @@ def parse_equity_quote(
         reference_price=reference_price,
         data_quality_flags=tuple(flags),
     )
-
-
-def _compute_rvol(premarket_volume: int, avg_volume: float | None) -> float | None:
-    if avg_volume is None or avg_volume <= 0 or premarket_volume <= 0:
-        return None
-    return premarket_volume / avg_volume
 
 
 def passes_filters(snapshot: EquitySnapshot, settings: EquityScanSettings) -> bool:
@@ -316,23 +310,17 @@ def has_premarket_activity(snapshot: EquitySnapshot, settings: EquityScanSetting
     return min_rvol <= 0 or (snapshot.rvol is not None and snapshot.rvol >= min_rvol)
 
 
-def _mover_change_pct(item: dict[str, Any]) -> float | None:
-    pct = item.get("changePercent") or item.get("netPercentChange")
-    if pct is None:
-        change = item.get("change") or item.get("netChange")
-        if change is None:
-            return None
-        try:
-            return float(change)
-        except (TypeError, ValueError):
-            return None
-    try:
-        return float(pct)
-    except (TypeError, ValueError):
-        return None
+def mover_change_pct(item: dict[str, Any]) -> float | None:
+    """The mover's percent change. A real 0.0 is kept, and the dollar `change` is
+    never substituted: it is a different unit."""
+    for key in ("changePercent", "netPercentChange"):
+        pct = _as_float(item.get(key))
+        if pct is not None:
+            return pct
+    return None
 
 
-def _mover_symbol(item: dict[str, Any]) -> str:
+def mover_symbol(item: dict[str, Any]) -> str:
     return str(item.get("symbol") or item.get("ticker") or "?")
 
 
@@ -349,10 +337,10 @@ def filter_movers(
         filtered: list[dict[str, Any]] = []
         seen: set[str] = set()
         for item in items:
-            pct = _mover_change_pct(item)
+            pct = mover_change_pct(item)
             if pct is None or abs(pct) < min_abs_pct:
                 continue
-            symbol = _mover_symbol(item)
+            symbol = mover_symbol(item)
             if symbol in seen:
                 continue
             seen.add(symbol)
@@ -361,8 +349,8 @@ def filter_movers(
 
     up = _filter(movers_up)
     down = _filter(movers_down)
-    up_symbols = {_mover_symbol(item) for item in up}
-    down_symbols = {_mover_symbol(item) for item in down}
+    up_symbols = {mover_symbol(item) for item in up}
+    down_symbols = {mover_symbol(item) for item in down}
     if up_symbols and up_symbols == down_symbols:
         return [], []
     return up, down

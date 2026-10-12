@@ -149,8 +149,8 @@ async def run_scan(
         phase_started = time.perf_counter()
         context_quotes = await provider.get_equity_quotes(scan_config.context_symbols)
         _record_phase(phase_timings_ms, "context_quotes", phase_started)
-        sector_map = load_sector_map(scan_config.universe_dir)
         liquid_meta = load_liquid_meta(scan_config.universe_dir)
+        sector_map = load_sector_map(scan_config.universe_dir, liquid_meta=liquid_meta)
         reference_prices = {
             symbol: float(payload["price"])
             for symbol, payload in liquid_meta.items()

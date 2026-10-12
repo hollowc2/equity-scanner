@@ -17,16 +17,15 @@ from __future__ import annotations
 import csv
 import io
 import json
-import os
 import re
-import stat
-import tempfile
 import urllib.request
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
 from schwab_gateway_sdk import QuoteV1
+
+from equity_scanner.files import atomic_write_text
 
 SP500_CSV_URL = (
     "https://raw.githubusercontent.com/datasets/s-and-p-500-companies/master/data/constituents.csv"
@@ -188,46 +187,22 @@ def fetch_nq100_tickers() -> list[str]:
     return parse_nq100_html(html)
 
 
-def _atomic_write_text(path: Path, content: str) -> None:
-    """Durably replace a file only after its complete contents are written."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o644
-    temp_path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=path.parent,
-            prefix=f".{path.name}.",
-            delete=False,
-        ) as handle:
-            temp_path = Path(handle.name)
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        temp_path.chmod(mode)
-        os.replace(temp_path, path)
-        temp_path = None
-        directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
-    finally:
-        if temp_path is not None:
-            temp_path.unlink(missing_ok=True)
-
-
 def write_universe_file(path: Path, tickers: list[str]) -> None:
-    _atomic_write_text(path, "\n".join(tickers) + "\n")
+    atomic_write_text(path, "\n".join(tickers) + "\n")
 
 
 def write_sector_map(path: Path, sectors: dict[str, str]) -> None:
-    _atomic_write_text(path, json.dumps(dict(sorted(sectors.items())), indent=2) + "\n")
+    atomic_write_text(path, json.dumps(dict(sorted(sectors.items())), indent=2) + "\n")
 
 
-def load_sector_map(universe_dir: str | Path) -> dict[str, str]:
-    """Load symbol -> sector mapping (GICS for index names, exchange fallback for liquid)."""
+def load_sector_map(
+    universe_dir: str | Path,
+    *,
+    liquid_meta: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, str]:
+    """Load symbol -> sector mapping (GICS for index names, exchange fallback for liquid).
+
+    Pass an already-loaded `liquid_meta` to avoid parsing liquid_meta.json twice."""
     path = Path(universe_dir) / "sectors.json"
     sectors: dict[str, str] = {}
     if path.exists():
@@ -235,17 +210,13 @@ def load_sector_map(universe_dir: str | Path) -> dict[str, str]:
         if isinstance(data, dict):
             sectors = {str(symbol).upper(): str(sector) for symbol, sector in data.items()}
 
-    meta_path = Path(universe_dir) / "liquid_meta.json"
-    if meta_path.exists():
-        meta = json.loads(meta_path.read_text())
-        if isinstance(meta, dict):
-            for symbol, payload in meta.items():
-                sym = str(symbol).upper()
-                if sym in sectors or not isinstance(payload, dict):
-                    continue
-                exchange = str(payload.get("exchange") or "").strip()
-                if exchange:
-                    sectors[sym] = exchange
+    meta = load_liquid_meta(universe_dir) if liquid_meta is None else liquid_meta
+    for sym, payload in meta.items():
+        if sym in sectors or not isinstance(payload, dict):
+            continue
+        exchange = str(payload.get("exchange") or "").strip()
+        if exchange:
+            sectors[sym] = exchange
     return sectors
 
 
@@ -436,7 +407,7 @@ def filter_symbols_by_avg_volume(
 
 
 def write_liquid_meta(path: Path, meta: dict[str, dict[str, Any]]) -> None:
-    _atomic_write_text(path, json.dumps(dict(sorted(meta.items())), indent=2) + "\n")
+    atomic_write_text(path, json.dumps(dict(sorted(meta.items())), indent=2) + "\n")
 
 
 def load_liquid_meta(universe_dir: str | Path) -> dict[str, dict[str, Any]]:
