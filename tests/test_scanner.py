@@ -572,3 +572,70 @@ def test_missing_prior_day_never_uses_live_gap(known_change):
     assert ("fade risk" in reasons) == (known_change == -4.0)
     if known_change is None:
         assert "prior unavailable" in "\n".join(build_report(results, settings=settings))
+
+
+def test_opening_focus_ignores_data_flags_and_caps_news() -> None:
+    """A thin, stale, flagged print with a huge news score (the 9/30 ENR case) must not
+    lead Opening Focus, and a data flag alone never qualifies a name."""
+    from dataclasses import replace
+
+    from equity_scanner.news import NewsImpact
+
+    settings = EquityScanSettings(filters={"min_rvol": 0.0})
+    quotes = {
+        "JUNK": _quote(
+            session="regular",
+            close=40.0,
+            last=41.9,
+            net_percent_change=4.8,
+            volume=41,
+            event_timestamp=TRADED_PREMARKET,
+        ),
+        "FLAGGED": _quote(
+            session="regular",
+            close=30.0,
+            last=30.0,
+            net_percent_change=0.0,
+            volume=0,
+            event_timestamp=TRADED_PREMARKET,
+        ),
+        "HEAVY": _quote(
+            session="regular",
+            close=50.0,
+            last=53.0,
+            net_percent_change=6.0,
+            volume=1_000_000,
+            event_timestamp=TRADED_PREMARKET,
+        ),
+    }
+    quotes = {symbol: quote.model_copy(update={"stale": True}) for symbol, quote in quotes.items()}
+    snapshots = build_snapshots(
+        quotes,
+        {symbol: {"liquid"} for symbol in quotes},
+        settings,
+        avg_volumes={"JUNK": 2_000_000.0, "FLAGGED": 2_000_000.0, "HEAVY": 5_000_000.0},
+        in_premarket=True,
+        generated_at=PREMARKET_AT,
+    )
+    assert all(snap.data_quality_flags for snap in snapshots)
+    snapshots = [
+        replace(snap, news=NewsImpact(symbol="JUNK", score=91.3, reasons=("recent headline",)))
+        if snap.symbol == "JUNK"
+        else snap
+        for snap in snapshots
+    ]
+
+    results = rank_scan_results(
+        snapshots,
+        settings=settings,
+        movers_up=[],
+        movers_down=[],
+        market_context=[],
+        scanned_symbols=len(quotes),
+        generated_at=PREMARKET_AT,
+    )
+
+    order = [item.snapshot.symbol for item in results.opening_focus]
+    assert "FLAGGED" not in order
+    assert order[0] == "HEAVY"
+    assert [snap.symbol for snap in results.catalyst_watch] == ["JUNK"]

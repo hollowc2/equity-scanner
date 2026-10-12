@@ -409,9 +409,8 @@ async def test_premarket_scan_finds_yesterdays_mover_from_stored_closes(
     else:
         assert payload["prior_gainers"] == []
         assert payload["prior_losers"] == []
-        for item in payload["opening_focus"]:
-            assert item["snapshot"]["prior_day_pct"] is None
-        assert "prior unavailable" in (tmp_path / "reports" / "2026-09-28.md").read_text()
+        # A flat name whose only distinction is a data-quality flag is not a setup.
+        assert payload["opening_focus"] == []
     assert payload["premarket_gainers"] == []  # flat premarket, below min_rvol anyway
     assert payload["matched_symbols"] == 2
     # QUIET's average comes from history (custom, no liquid_meta); FLAT's history is only the

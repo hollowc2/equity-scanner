@@ -11,7 +11,7 @@ import csv
 import datetime as dt
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from io import StringIO
 from typing import Any
 
@@ -25,6 +25,9 @@ SEC_SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik:010d}.json"
 ALPHA_VANTAGE_URL = "https://www.alphavantage.co/query"
 
 log = logging.getLogger(__name__)
+
+EXTRA_ITEM_BONUS = 0.5
+MAX_BONUS_ITEMS = 4
 
 
 class _RequestStartLimiter:
@@ -98,6 +101,16 @@ def _merge_impact(
     )
 
 
+def _combined_score(scores: list[float]) -> float:
+    """One provider's score for a symbol: its strongest item plus a small bonus per
+    extra item. Summing every item let a feed of 20 near-duplicate headlines outrank
+    any price move."""
+    if not scores:
+        return 0.0
+    extras = min(len(scores) - 1, MAX_BONUS_ITEMS)
+    return max(scores) + extras * EXTRA_ITEM_BONUS
+
+
 def _sec_form_score(form: str) -> float:
     if form == "8-K":
         return 6.0
@@ -155,6 +168,7 @@ def _recent_sec_filings(
     allowed_forms = set(settings.sec_forms)
 
     impact: NewsImpact | None = None
+    scores: list[float] = []
     for idx, form in enumerate(forms):
         form = str(form)
         if form not in allowed_forms:
@@ -166,16 +180,19 @@ def _recent_sec_filings(
         label = f"{form} filed {filing_date.isoformat()}"
         if description and description != form:
             label = f"{label}: {description[:80]}"
+        scores.append(_sec_form_score(form))
         impact = _merge_impact(
             impact,
             symbol=symbol,
-            score=_sec_form_score(form),
+            score=0.0,
             reasons=["recent SEC filing"],
             headlines=[label],
             forms=[form],
             providers=["sec"],
         )
-    return impact
+    if impact is None:
+        return None
+    return replace(impact, score=_combined_score(scores))
 
 
 async def _fetch_sec_impacts(
@@ -298,6 +315,7 @@ async def _fetch_alpha_news_for_symbol(
     feed = payload.get("feed") or []
 
     impact: NewsImpact | None = None
+    scores: list[float] = []
     for article in feed[: settings.alpha_vantage_news_limit]:
         title = str(article.get("title") or "").strip()
         topics = {
@@ -321,15 +339,18 @@ async def _fetch_alpha_news_for_symbol(
         if {"earnings", "mergers & acquisitions", "ipo"} & topics:
             score += 2.0
             reasons.append("impact topic")
+        scores.append(score)
         impact = _merge_impact(
             impact,
             symbol=symbol,
-            score=score,
+            score=0.0,
             reasons=reasons,
             headlines=[title] if title else None,
             providers=["alpha_vantage"],
         )
-    return impact
+    if impact is None:
+        return None
+    return replace(impact, score=_combined_score(scores))
 
 
 async def _fetch_alpha_impacts(

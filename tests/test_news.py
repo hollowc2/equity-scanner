@@ -10,9 +10,12 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 
+import httpx
+
 from equity_scanner import news
 from equity_scanner.news import (
     NewsImpact,
+    _combined_score,
     _merge_impact,
     _recent_sec_filings,
     _sec_form_score,
@@ -184,3 +187,41 @@ async def test_alpha_news_fetches_use_bounded_concurrency(monkeypatch):
 
     assert max_active == 2
     assert len(impacts) == 6
+
+
+def test_combined_score_uses_strongest_item_with_bounded_bonus():
+    assert _combined_score([]) == 0.0
+    assert _combined_score([3.0]) == 3.0
+    assert _combined_score([2.0, 5.0, 1.0]) == 6.0
+    assert _combined_score([5.0] * 20) == 7.0
+
+
+def test_recent_sec_filings_does_not_sum_every_filing():
+    settings = EquityNewsSettings(recent_days=3)
+    today = dt.date(2026, 6, 8)
+    impact = _recent_sec_filings(
+        "AAPL",
+        {"filings": {"recent": {"form": ["8-K"] * 6, "filingDate": ["2026-06-07"] * 6}}},
+        today=today,
+        settings=settings,
+    )
+    assert impact is not None
+    assert impact.score == 6.0 + 4 * 0.5
+
+
+async def test_alpha_news_score_is_bounded_for_a_long_feed():
+    article = {
+        "title": "Stock Price, News, Quote",
+        "topics": [{"topic": "Earnings"}],
+        "ticker_sentiment": [{"ticker": "ENR", "relevance_score": "1.0"}],
+    }
+
+    def handler(request):
+        return httpx.Response(200, json={"feed": [article] * 20})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        impact = await news._fetch_alpha_news_for_symbol(
+            client, "ENR", settings=EquityNewsSettings(), api_key="test"
+        )
+    assert impact is not None
+    assert impact.score == 5.0 + 4 * 0.5
