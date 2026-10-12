@@ -686,3 +686,67 @@ def test_sector_cluster_needs_the_name_itself_to_move() -> None:
     focus = {item.snapshot.symbol: item.reasons for item in results.opening_focus}
     assert "FLAT" not in focus
     assert "sector cluster" in focus["UP1"]
+
+
+def _focus_snapshot(
+    symbol: str,
+    *,
+    gap: float,
+    rvol: float,
+    sector: str = "Unknown",
+    prior: float = 0.0,
+    flags: tuple[str, ...] = (),
+):
+    from equity_scanner.scanner import EquitySnapshot
+
+    return EquitySnapshot(
+        symbol=symbol,
+        price=100.0,
+        prior_close=100.0,
+        prior_day_pct=prior,
+        session_gap_pct=gap,
+        volume=int(rvol * 1_000_000),
+        premarket_volume=int(rvol * 1_000_000),
+        avg_volume_20d=1_000_000.0,
+        rvol=rvol,
+        sector=sector,
+        universes=("liquid",),
+        data_quality_flags=flags,
+    )
+
+
+def test_exchange_and_index_fallback_sectors_never_form_a_cluster() -> None:
+    from equity_scanner.scanner import rank_opening_focus
+
+    settings = EquityScanSettings()
+    snapshots = [
+        _focus_snapshot(f"{sector[:3]}{i}", gap=5.0, rvol=0.5, sector=sector)
+        for sector in ("NASDAQ", "Nasdaq-100", "Energy")
+        for i in range(2)
+    ]
+
+    focus = rank_opening_focus(snapshots, settings=settings, premarket=True)
+
+    clustered = {item.snapshot.symbol for item in focus if "sector cluster" in item.reasons}
+    assert clustered == {"Ene0", "Ene1"}
+
+
+def test_headlines_need_volume_a_fresh_quote_and_an_own_reason() -> None:
+    from equity_scanner.scanner import FOCUS_HEADLINE_LIMIT, rank_opening_focus
+
+    settings = EquityScanSettings()
+    snapshots = [
+        _focus_snapshot("STALE", gap=9.0, rvol=1.0, flags=("stale", "gateway_stale")),
+        # Thin: its gap is not trusted premarket; yesterday's move plus the
+        # cluster put it in focus, but neither is a setup of its own.
+        _focus_snapshot("THIN", gap=8.0, rvol=0.01, sector="Energy", prior=4.0),
+        _focus_snapshot("PEER", gap=3.0, rvol=0.5, sector="Energy"),
+        *[_focus_snapshot(f"OK{i}", gap=4.0 - i * 0.1, rvol=0.5) for i in range(5)],
+    ]
+
+    focus = rank_opening_focus(snapshots, settings=settings, premarket=True)
+
+    assert {"STALE", "THIN"} <= {item.snapshot.symbol for item in focus}
+    headlines = [item.snapshot.symbol for item in focus if item.headline]
+    assert len(headlines) == FOCUS_HEADLINE_LIMIT
+    assert headlines == ["PEER", "OK0", "OK1"]

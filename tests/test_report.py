@@ -24,6 +24,8 @@ from equity_scanner.scan_config import EquityScanSettings
 from equity_scanner.scanner import (
     EquitySnapshot,
     MarketContext,
+    OpeningFocusItem,
+    ScanResults,
     attach_news_impacts,
     parse_equity_quote,
     rank_scan_results,
@@ -314,3 +316,82 @@ def test_archives_are_replaced_atomically(tmp_path, monkeypatch):
 
     assert path.read_text() == "old\n"
     assert list(tmp_path.iterdir()) == [path]
+
+
+def _snapshot(symbol: str, **overrides) -> EquitySnapshot:
+    fields = dict(
+        symbol=symbol, price=50.0, prior_close=48.0, prior_day_pct=-6.0,
+        session_gap_pct=4.0, volume=900_000, premarket_volume=900_000,
+        avg_volume_20d=3_000_000, rvol=0.3, sector="NASDAQ", universes=("liquid",),
+    )
+    fields.update(overrides)
+    return EquitySnapshot(**fields)
+
+
+def _results(**overrides) -> ScanResults:
+    fields = dict(
+        opening_focus=[], catalyst_watch=[], prior_gainers=[], prior_losers=[],
+        premarket_gainers=[], premarket_losers=[], movers_up=[], movers_down=[],
+        market_context=[], scanned_symbols=10, matched_symbols=10,
+    )
+    fields.update(overrides)
+    return ScanResults(**fields)
+
+
+def test_build_report_leads_with_top_setups_and_stars_them_in_lists():
+    settings = EquityScanSettings()
+    top = _snapshot("TOP")
+    rest = _snapshot("REST", session_gap_pct=-2.5)
+    results = _results(
+        opening_focus=[
+            OpeningFocusItem(top, score=20.0, reasons=("gap with volume",), headline=True),
+            OpeningFocusItem(rest, score=9.0, reasons=("gap with volume",)),
+        ],
+        prior_losers=[top],
+        premarket_losers=[rest],
+    )
+
+    report = "\n".join(build_report(results, settings=settings, generated_at=_premarket_et()))
+
+    assert report.index("Top Setups") < report.index("Opening Focus")
+    assert "🟢 **TOP  +4.0%** gap @ $50.00 · 900K pm vol · RVOL 0.3x" in report
+    assert "-# ↳ gap with volume · prior -6.0%" in report
+    assert "**🎯 Opening Focus** (1)\n🔴 **REST** gap -2.5%" in report
+    assert "**TOP** **-6.0%** ⭐" in report
+    assert "**REST** **-2.5%** @" in report
+
+
+def test_build_report_omits_top_setups_without_headlines():
+    settings = EquityScanSettings()
+    item = OpeningFocusItem(_snapshot("ONLY"), score=5.0, reasons=("sector cluster",))
+
+    results = _results(opening_focus=[item])
+
+    report = "\n".join(build_report(results, settings=settings, generated_at=_premarket_et()))
+
+    assert "Top Setups" not in report
+    assert "**🎯 Opening Focus** (1)\n🟢 **ONLY**" in report
+
+
+def test_build_report_quiets_routine_tags():
+    settings = EquityScanSettings()
+    settings.group_by_sector = True
+    stale = ("stale", "gateway_stale", "prior_day_unavailable")
+    results = _results(
+        prior_gainers=[_snapshot("OLD", prior_day_pct=5.0, data_quality_flags=stale)],
+        premarket_gainers=[
+            _snapshot("GAP", universes=("liquid", "sp500"), data_quality_flags=stale)
+        ],
+    )
+
+    report = "\n".join(build_report(results, settings=settings, generated_at=_premarket_et()))
+
+    # Only exchange-fallback sectors: no group header.
+    assert "OTHER" not in report
+    assert "Liq" not in report.split("\n", 3)[3]
+    assert (
+        "**GAP** **+4.0%** @ $50.00 · 900K vol · RVOL 0.3x · S&P · "
+        "⚠ stale,prior_day_unavailable"
+    ) in report
+    # Staleness is expected on yesterday's movers; other flags still show.
+    assert "**OLD** **+5.0%** @ $50.00 · 900K vol · RVOL 0.3x · ⚠ prior_day_unavailable" in report
