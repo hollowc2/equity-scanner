@@ -97,7 +97,7 @@ still require supervised runtime proof. Do not remove ButterflyGuy's raw recorde
 or candle backfill until that proof is preserved as described in `dependency-map.md`.
 
 
-## Missing-symbol remediation prepared 2026-11-03 (not deployed)
+## Missing-symbol remediation — deployed 2026-11-03
 
 The candidate replaces batch retries/bisection with the gateway's explicit
 available-quote contract for the scan and universe refresh. It pins SDK 0.8.3 at
@@ -146,6 +146,28 @@ under the same lock, using a temporary file plus rename (or the saved original
 pointer). No service restart or cron change is needed. Preserve all reports,
 universe files and the old image. This scanner change cannot resolve a host DNS
 outage; DNS diagnosis and any resolver/monitoring rollout are separate work.
+
+Deployment completed at **2026-11-03 17:38:02 UTC** (09:38 Pacific):
+
+- Runtime source commit: `7e29bb1557f0908fae9069ee1f54c3c36769a61d`.
+- Active immutable image:
+  `sha256:88ada47799bb948cba889ed0cc3c07fc65d5c3e47ae9658cc3068c4ea132e17b`.
+- Helios image build and network-disabled container CLI/import smoke checks passed.
+- Approved isolated dry-run completed in 40.36 seconds: 1,871 requested symbols,
+  1,870 returned, `INDV` explicitly missing, zero failed quote batches, 19 initial
+  quote calls with concurrency one. All five strict context quotes returned.
+- Protected 503/504 counters did not increase during validation. Gateway readiness
+  remained healthy; gateway and trading-container identities/restarts were preserved.
+- `.production-image` now selects the candidate for both scheduled scanner services;
+  Compose image resolution was verified. Cron, launchers and production config hashes
+  are unchanged. No Discord notification was sent by validation.
+- Runtime evidence and rollback record:
+  `/opt/equity-scanner/.deploy-backups/20261103-partial-quotes-7e29bb1/record.json`.
+  Build/validation logs are in the matching `.releases/` directory. Dry-run archives
+  are isolated under `reports/.validation-20261103-partial-quotes-7e29bb1/`.
+- The first scheduled scan/delivery, first scheduled refresh and full-session
+  acceptance checks remain pending. The deployment does not establish the cause
+  of the earlier DNS interruption.
 
 ## Production deployment prepared 2026-09-13
 
