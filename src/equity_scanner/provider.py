@@ -15,15 +15,16 @@ from typing import Any, Literal
 from schwab_gateway_sdk import GatewayMarketDataClient, QuoteV1
 from schwab_gateway_sdk.client import (
     GatewayCapacityError,
+    GatewayRateLimitError,
+    GatewayResponseError,
     GatewayTimeoutError,
     GatewayUnavailableError,
 )
 
 log = logging.getLogger(__name__)
 
-# Above this share of failed quote batches the gateway itself is unhealthy, not a
-# symbol, so isolating unquotable symbols is not attempted.
-MAX_FAILED_BATCH_FRACTION = 0.1
+# Preserve the coverage guard even when missing symbols are explicitly reported.
+MAX_PARTIAL_BATCH_FRACTION = 0.1
 
 
 def _gateway_symbol(symbol: str) -> str:
@@ -59,8 +60,9 @@ class QuoteCoverage:
     max_concurrency: int
     complete: bool
     verdict: Literal["complete", "incomplete"]
-    # Symbols dropped after bisecting a failed batch down to them alone.
+    # Symbols the gateway explicitly reports as unavailable in partial mode.
     isolated_symbols: tuple[str, ...] = ()
+    partial_batch_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -116,6 +118,9 @@ class GatewayEquityDataProvider:
         for attempt in range(1, self._max_attempts + 1):
             try:
                 return await operation()
+            except GatewayRateLimitError:
+                # Leave upstream throttling to the gateway's shared cooldown.
+                raise
             except (GatewayCapacityError, GatewayTimeoutError, GatewayUnavailableError):
                 if attempt == self._max_attempts:
                     raise
@@ -189,86 +194,35 @@ class GatewayEquityDataProvider:
         concurrency: int = 4,
         max_unquotable_symbols: int = 0,
     ) -> QuoteCollection:
-        """Collect quote batches; optionally survive a few symbols the upstream rejects.
+        """Optionally accept explicitly missing symbols without retries or bisection.
 
-        The gateway fails a whole batch when Schwab omits one symbol (e.g. a delisted
-        or renamed ticker), and retries cannot fix that. With
-        ``max_unquotable_symbols`` > 0, each failed batch is bisected until the
-        failures are single symbols, which are dropped and reported in
-        ``coverage.isolated_symbols``. Many failed batches mean the gateway itself is
-        unhealthy, so the original error is raised; more than
-        ``max_unquotable_symbols`` isolated symbols raises RuntimeError.
+        Partial mode keeps both coverage limits: at most ``max_unquotable_symbols``
+        missing names and at most 10% partial batches (with one batch allowed).
+        Transport, authentication and contract failures always propagate with the
+        completed coverage attached; none are classified as unquotable symbols.
         """
-        try:
-            return await self._collect_quote_batches(
-                symbols, batch_size=batch_size, concurrency=concurrency
-            )
-        except Exception as exc:
-            collection = getattr(exc, "quote_collection", None)
-            if max_unquotable_symbols < 1 or collection is None:
-                raise
-            coverage = collection.coverage
-            allowed = max(1, int(coverage.initial_call_count * MAX_FAILED_BATCH_FRACTION))
-            if coverage.failed_batch_count > allowed:
-                raise
-
-        quotes = dict(collection.quotes)
-        isolated: list[str] = []
-        for failure in coverage.failed_batches:
-            log.warning(
-                "gateway_quote_batch_isolating batch_id=%d symbol_count=%d error_type=%s",
-                failure.batch_index,
-                len(failure.symbols),
-                failure.error_type,
-            )
-            await self._isolate_failed_batch(
-                list(failure.symbols), quotes, isolated, max_unquotable_symbols
-            )
-
-        requested = coverage.requested_symbols
-        returned = tuple(symbol for symbol in requested if symbol in quotes)
-        unavailable = tuple(symbol for symbol in requested if symbol not in quotes)
-        stale = tuple(symbol for symbol in requested if symbol in quotes and quotes[symbol].stale)
-        coverage = replace(
-            coverage,
-            returned_count=len(returned),
-            returned_symbols=returned,
-            stale_retained_count=len(stale),
-            stale_retained_symbols=stale,
-            unavailable_count=len(unavailable),
-            unavailable_symbols=unavailable,
-            isolated_symbols=tuple(isolated),
+        collection = await self._collect_quote_batches(
+            symbols, batch_size=batch_size, concurrency=concurrency,
+            allow_partial=max_unquotable_symbols > 0,
         )
-        log.info(
-            "gateway_quote_coverage_after_isolation returned=%d unavailable=%d isolated=%s",
-            coverage.returned_count,
-            coverage.unavailable_count,
-            ",".join(isolated),
+        if max_unquotable_symbols < 1:
+            return collection
+        coverage = collection.coverage
+        error: RuntimeError | None = None
+        if coverage.unavailable_count > max_unquotable_symbols:
+            error = RuntimeError(f"more than {max_unquotable_symbols} symbols failed to quote")
+        allowed = max(1, int(coverage.initial_call_count * MAX_PARTIAL_BATCH_FRACTION))
+        if error is None and coverage.partial_batch_count > allowed:
+            error = GatewayUnavailableError("too many quote batches have missing symbols")
+        if error is not None:
+            error.quote_collection = collection  # type: ignore[attr-defined]
+            raise error
+        for symbol in coverage.unavailable_symbols:
+            log.warning("gateway_quote_symbol_unquotable symbol=%s", symbol)
+        return replace(
+            collection,
+            coverage=replace(coverage, isolated_symbols=coverage.unavailable_symbols),
         )
-        return QuoteCollection(quotes=quotes, coverage=coverage)
-
-    async def _isolate_failed_batch(
-        self,
-        symbols: list[str],
-        quotes: dict[str, QuoteV1],
-        isolated: list[str],
-        max_unquotable_symbols: int,
-    ) -> None:
-        """Split a failing batch in halves until each failure is a single symbol."""
-        if len(symbols) == 1:
-            isolated.append(symbols[0])
-            log.warning("gateway_quote_symbol_unquotable symbol=%s", symbols[0])
-            if len(isolated) > max_unquotable_symbols:
-                raise RuntimeError(
-                    f"more than {max_unquotable_symbols} symbols failed to quote"
-                )
-            return
-        middle = len(symbols) // 2
-        for half in (symbols[:middle], symbols[middle:]):
-            try:
-                quotes.update(await self.get_equity_quotes(half, batch_size=len(half)))
-            except Exception:
-                await self._isolate_failed_batch(half, quotes, isolated, max_unquotable_symbols)
 
     async def _collect_quote_batches(
         self,
@@ -276,6 +230,7 @@ class GatewayEquityDataProvider:
         *,
         batch_size: int,
         concurrency: int,
+        allow_partial: bool = False,
     ) -> QuoteCollection:
         """Collect bounded quote batches and retain auditable coverage evidence.
 
@@ -326,7 +281,16 @@ class GatewayEquityDataProvider:
 
         async def _fetch(batch_index: int, chunk: list[str]) -> _BatchResult:
             async with sem:
-                response = await self._retry(lambda: self._client.get_quotes(chunk))
+                operation = (
+                    self._client.get_available_quotes if allow_partial else self._client.get_quotes
+                )
+                response = await self._retry(lambda: operation(chunk))
+                if allow_partial:
+                    returned = {quote.symbol for quote in response.quotes}
+                    missing = set(response.missing_symbols)
+                    if (not returned or returned & missing
+                            or returned | missing != set(chunk)):
+                        raise GatewayResponseError("gateway partial quote coverage is inconsistent")
                 return _BatchResult(batch_index, tuple(chunk), tuple(response.quotes))
 
         tasks = [
@@ -352,6 +316,7 @@ class GatewayEquityDataProvider:
 
         quotes: dict[str, QuoteV1] = {}
         stale_symbols: set[str] = set()
+        partial_batch_count = 0
         for batch_index in sorted(batch_results):
             result = batch_results[batch_index]
             returned_gateway_symbols: set[str] = set()
@@ -385,6 +350,7 @@ class GatewayEquityDataProvider:
                 for symbol in set(result.chunk) - returned_gateway_symbols
             )
             if missing:
+                partial_batch_count += 1
                 log.warning(
                     "gateway_quote_batch_partial batch_id=%d missing_symbols=%s",
                     batch_index,
@@ -431,6 +397,7 @@ class GatewayEquityDataProvider:
             max_concurrency=min(concurrency, len(chunks)),
             complete=complete,
             verdict="complete" if complete else "incomplete",
+            partial_batch_count=partial_batch_count,
         )
         collection = QuoteCollection(quotes=quotes, coverage=coverage)
         log.info(

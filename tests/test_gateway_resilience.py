@@ -8,6 +8,7 @@ import pytest
 from schwab_gateway_sdk.client import (
     GatewayAuthenticationError,
     GatewayCapacityError,
+    GatewayRateLimitError,
     GatewayResponseError,
     GatewayTimeoutError,
     GatewayUnavailableError,
@@ -256,11 +257,18 @@ async def test_strict_mode_preserves_exception_type_and_completed_evidence() -> 
 
 
 def _rejecting(rejected: set[str], requests: list[list[str]]):
-    """Gateway behavior seen live for PSKY: Schwab omits a symbol, the gateway 502s."""
+    """Model strict and opt-in partial responses when Schwab omits a symbol."""
 
     def handler(request):
         symbols = request.url.params["symbols"].split(",")
         requests.append(symbols)
+        if request.url.params.get("allow_partial") == "true":
+            available = [s for s in symbols if s not in rejected]
+            if available:
+                return httpx.Response(200, json={
+                    "schema_version": "1.0", "quotes": [quote(s) for s in available],
+                    "missing_symbols": [s for s in symbols if s in rejected],
+                })
         if rejected & set(symbols):
             return httpx.Response(502, json={"detail": "upstream unavailable"})
         return httpx.Response(
@@ -274,7 +282,7 @@ def _rejecting(rejected: set[str], requests: list[list[str]]):
 async def test_unquotable_symbol_is_isolated_instead_of_failing_collection() -> None:
     requests: list[list[str]] = []
     symbols = [f"S{i:03d}" for i in range(300)]
-    http, provider = await _provider(_rejecting({"S150"}, requests), max_attempts=1)
+    http, provider = await _provider(_rejecting({"S150"}, requests))
     try:
         collection = await provider.get_equity_quote_collection(
             symbols, max_unquotable_symbols=10
@@ -287,10 +295,83 @@ async def test_unquotable_symbol_is_isolated_instead_of_failing_collection() -> 
     assert coverage.isolated_symbols == ("S150",)
     assert coverage.unavailable_symbols == ("S150",)
     assert coverage.returned_count == 299
-    assert coverage.failed_batch_count == 1
+    assert coverage.failed_batch_count == 0
+    assert coverage.partial_batch_count == 1
     assert coverage.verdict == "incomplete"
-    # 3 initial batches, then the failed 100 is bisected (100/50/25/12/6/3): 2 calls each.
-    assert len(requests) == 3 + 12
+    # Even with the default three-attempt budget, missing symbols need no retry or split.
+    assert len(requests) == 3
+
+
+@pytest.mark.parametrize("status", [401, 403, 429, 502, 503, 504])
+async def test_partial_mode_does_not_bisect_real_gateway_errors(status) -> None:
+    calls = []
+
+    def handler(request):
+        calls.append(request.url.params["symbols"])
+        return httpx.Response(status)
+
+    http, provider = await _provider(handler, max_attempts=1)
+    try:
+        with pytest.raises(RuntimeError) as caught:
+            await provider.get_equity_quote_collection(
+                ["AAPL", "MSFT"], max_unquotable_symbols=10
+            )
+    finally:
+        await http.aclose()
+    assert len(calls) == 1
+    assert caught.value.quote_collection.coverage.unavailable_count == 2
+
+
+@pytest.mark.parametrize("missing", [[], ["OTHER"]])
+async def test_partial_mode_requires_exact_missing_symbol_accounting(missing) -> None:
+    http, provider = await _provider(lambda request: httpx.Response(200, json={
+        "schema_version": "1.0", "quotes": [quote("AAPL")], "missing_symbols": missing,
+    }))
+    try:
+        with pytest.raises(GatewayResponseError):
+            await provider.get_equity_quote_collection(
+                ["AAPL", "MSFT"], max_unquotable_symbols=10
+            )
+    finally:
+        await http.aclose()
+
+
+async def test_partial_mode_translates_missing_class_share_symbols(caplog) -> None:
+    requests = []
+    http, provider = await _provider(_rejecting({"BRK/B"}, requests))
+    try:
+        collection = await provider.get_equity_quote_collection(
+            ["AAPL", "BRK.B"], max_unquotable_symbols=10
+        )
+    finally:
+        await http.aclose()
+    assert set(collection.quotes) == {"AAPL"}
+    assert collection.coverage.isolated_symbols == ("BRK.B",)
+    assert collection.coverage.unavailable_symbols == ("BRK.B",)
+    assert "BRK.B" in caplog.text
+    assert len(requests) == 1
+
+
+async def test_upstream_rate_limit_is_not_retried_or_classified_as_a_missing_symbol() -> None:
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(503, headers={"Retry-After": "30"}, json={
+            "error": {"code": "upstream_rate_limited"},
+        })
+
+    http, provider = await _provider(handler)
+    try:
+        with pytest.raises(GatewayRateLimitError) as caught:
+            await provider.get_equity_quote_collection(
+                ["AAPL", "INDV"], max_unquotable_symbols=10
+            )
+    finally:
+        await http.aclose()
+    assert len(calls) == 1
+    assert caught.value.retry_after_seconds == 30
+    assert caught.value.quote_collection.coverage.isolated_symbols == ()
 
 
 async def test_isolation_is_opt_in() -> None:
