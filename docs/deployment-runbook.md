@@ -97,6 +97,78 @@ still require supervised runtime proof. Do not remove ButterflyGuy's raw recorde
 or candle backfill until that proof is preserved as described in `dependency-map.md`.
 
 
+## Missing-symbol remediation — deployed 2026-11-03
+
+The candidate replaces batch retries/bisection with the gateway's explicit
+available-quote contract for the scan and universe refresh. It pins SDK 0.8.3 at
+`2e3352bf6efb5341fd45962447d880695836700d`, retains coverage limits, propagates real
+gateway failures, and suppresses automatic retries of explicit upstream rate limits.
+Strict context reads keep the strict SDK contract.
+
+Read-only preflight on `billy@helios` at 17:25 UTC confirmed:
+
+- Target: `/opt/equity-scanner`, Compose project `equity_scanner_production`,
+  one-shot `scan` and `refresh-universes` services selected by `.production-image`.
+- Current immutable image:
+  `sha256:e4d4419798a09e021904a2b9d3d5c6f143f67cb72c82dc845dcd32ced339c94c`.
+- No scanner job or container running. Existing cron/launchers select the image;
+  the host directory is not a Git checkout, and inherited image OCI revision
+  labels identify the base image, so neither is a reliable scanner source SHA.
+- Gateway ready, no gateway/consumer restart required. About 11 GB available on
+  `/opt`. Existing Compose uses host networking, read-only runtime/config/data for
+  the scan, writable reports, and no persistent scanner service.
+
+Local validation: 175 scanner tests and Ruff passed; wheel and sdist built from
+the locked dependency candidate. Local Docker image build could not run because
+the local Docker daemon is unavailable. No real-provider scan or notification was
+sent during validation. An image build and container smoke test remain required.
+
+After approval for this scanner-only release:
+
+1. Recheck no active scan/refresh and acquire the existing production-job lock.
+   Preserve `.production-image` in a timestamped deployment backup. Record the
+   candidate source/patch checksums and original immutable image above.
+2. Stage only the scanner build context; build a new image with the existing
+   Dockerfile and frozen lock. Record its immutable ID. Do not touch the gateway,
+   ButterflyGuy containers, schedules, secrets or resolver configuration.
+3. Check the candidate CLI in a container without secrets or external networking.
+   Run one separately approved bounded dry-run scan with the production config,
+   existing external gateway credentials and a separate validation report path.
+   Inspect exact coverage/missing names and gateway failures before and after.
+   Require unexpected-error-free validation before changing the image pointer.
+4. Atomically set `.production-image` to the validated candidate ID. Observe the
+   next scheduled scan archive and its normal delivery; the first scheduled
+   universe refresh and a full market session remain future acceptance checks.
+
+Rollback restores `.production-image` to
+`sha256:e4d4419798a09e021904a2b9d3d5c6f143f67cb72c82dc845dcd32ced339c94c`
+under the same lock, using a temporary file plus rename (or the saved original
+pointer). No service restart or cron change is needed. Preserve all reports,
+universe files and the old image. This scanner change cannot resolve a host DNS
+outage; DNS diagnosis and any resolver/monitoring rollout are separate work.
+
+Deployment completed at **2026-11-03 17:38:02 UTC** (09:38 Pacific):
+
+- Runtime source commit: `7e29bb1557f0908fae9069ee1f54c3c36769a61d`.
+- Active immutable image:
+  `sha256:88ada47799bb948cba889ed0cc3c07fc65d5c3e47ae9658cc3068c4ea132e17b`.
+- Helios image build and network-disabled container CLI/import smoke checks passed.
+- Approved isolated dry-run completed in 40.36 seconds: 1,871 requested symbols,
+  1,870 returned, `INDV` explicitly missing, zero failed quote batches, 19 initial
+  quote calls with concurrency one. All five strict context quotes returned.
+- Protected 503/504 counters did not increase during validation. Gateway readiness
+  remained healthy; gateway and trading-container identities/restarts were preserved.
+- `.production-image` now selects the candidate for both scheduled scanner services;
+  Compose image resolution was verified. Cron, launchers and production config hashes
+  are unchanged. No Discord notification was sent by validation.
+- Runtime evidence and rollback record:
+  `/opt/equity-scanner/.deploy-backups/20261103-partial-quotes-7e29bb1/record.json`.
+  Build/validation logs are in the matching `.releases/` directory. Dry-run archives
+  are isolated under `reports/.validation-20261103-partial-quotes-7e29bb1/`.
+- The first scheduled scan/delivery, first scheduled refresh and full-session
+  acceptance checks remain pending. The deployment does not establish the cause
+  of the earlier DNS interruption.
+
 ## Production deployment prepared 2026-09-13
 
 The explicit migration request authorizes replacing both ButterflyGuy schedules on

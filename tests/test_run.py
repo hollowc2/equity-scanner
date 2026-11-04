@@ -204,6 +204,8 @@ async def test_mocked_twenty_batch_scan_archives_complete_coverage(
             200,
             json={
                 "schema_version": "1.0",
+                **({"missing_symbols": []}
+                   if request.url.params.get("allow_partial") == "true" else {}),
                 "quotes": [
                     {
                         "symbol": symbol,

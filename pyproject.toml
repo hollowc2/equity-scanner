@@ -16,7 +16,7 @@ equity-scanner-run = "equity_scanner.run:main"
 equity-scanner-refresh-universes = "equity_scanner.refresh_universes:main"
 
 [tool.uv.sources]
-schwab-gateway-sdk = { git = "https://github.com/hollowc2/SchwabGateway.git", rev = "5b8f1d76aa9fb97a300172d39e7afcc4ab60e83a", subdirectory = "packages/sdk" }
+schwab-gateway-sdk = { git = "https://github.com/hollowc2/SchwabGateway.git", rev = "2e3352bf6efb5341fd45962447d880695836700d", subdirectory = "packages/sdk" }
 
 [build-system]
 requires = ["hatchling"]

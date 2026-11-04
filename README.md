@@ -49,6 +49,13 @@ uv run ruff check .
 
 Tests use fakes only. They need no credentials or network access.
 
+Scan and universe-refresh quote batches request the gateway's available-quote
+contract. Missing symbols are recorded in coverage and logged individually without
+retrying or splitting the batch. The existing limits on missing symbols and affected
+batches still apply. Strict quote reads (including market context) keep their normal
+contract. Authentication, malformed responses and gateway outages fail the job;
+explicit upstream rate limits are propagated without automatic retries.
+
 ## Deployment
 
 Deployment needs separate approval. See the

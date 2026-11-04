@@ -29,10 +29,11 @@ async def _fetch(symbols: list[str], *, rejected: set[str], batch_size: int = 4)
     def handler(request: httpx.Request) -> httpx.Response:
         batch = request.url.params["symbols"].split(",")
         requests.append(batch)
-        if rejected & set(batch):
-            return httpx.Response(503, json={"detail": "upstream unavailable"})
+        assert request.url.params["allow_partial"] == "true"
+        available = [s for s in batch if s not in rejected]
         return httpx.Response(
-            200, json={"schema_version": "1.0", "quotes": [_quote(s) for s in batch]}
+            200, json={"schema_version": "1.0", "quotes": [_quote(s) for s in available],
+                       "missing_symbols": [s for s in batch if s in rejected]}
         )
 
     settings = AppSettings.model_validate(
@@ -60,8 +61,8 @@ async def test_seed_quotes_isolate_a_rejected_symbol_instead_of_aborting():
 
     assert unquotable == ["S05"]
     assert set(quotes) == set(symbols) - {"S05"}
-    # 10 initial batches, then the failed batch of 4 is bisected: 2 + 2 more calls.
-    assert len(requests) == 14
+    # Partial quotes name the missing symbol without retrying or splitting batches.
+    assert len(requests) == 10
 
 
 async def test_seed_quotes_abort_when_many_batches_fail():
@@ -95,7 +96,8 @@ async def test_liquid_refresh_keeps_existing_files_when_average_volumes_fail(
         if request.url.path == "/v1/quotes":
             batch = request.url.params["symbols"].split(",")
             return httpx.Response(
-                200, json={"schema_version": "1.0", "quotes": [_quote(s) for s in batch]}
+                200, json={"schema_version": "1.0", "quotes": [_quote(s) for s in batch],
+                           "missing_symbols": []}
             )
         return httpx.Response(
             200,
