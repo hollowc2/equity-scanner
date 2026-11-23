@@ -32,12 +32,24 @@ class _FakeProcess:
         return False
 
 
-def _run_main(monkeypatch, tmp_path, *, service: str, returncode: int, output: str = ""):
+_EXTERNAL_ENV = (
+    "EQUITY_DISCORD_WEBHOOK_URL=https://example.invalid/hook\n"
+    "SEC_USER_AGENT=Scanner ops@example.invalid\n"
+)
+
+
+def _run_main(
+    monkeypatch,
+    tmp_path,
+    *,
+    service: str,
+    returncode: int,
+    output: str = "",
+    external_env: str = _EXTERNAL_ENV,
+    expected_exit: type[BaseException] = SystemExit,
+):
     source = tmp_path / "external.env"
-    source.write_text(
-        "EQUITY_DISCORD_WEBHOOK_URL=https://example.invalid/hook\n"
-        "SEC_USER_AGENT=Scanner ops@example.invalid\n"
-    )
+    source.write_text(external_env)
     commands: list[list[str]] = []
     alerts: list[tuple[str, str]] = []
 
@@ -54,13 +66,13 @@ def _run_main(monkeypatch, tmp_path, *, service: str, returncode: int, output: s
     monkeypatch.setenv("EQUITY_SCANNER_NOTIFICATION_ENV", str(source))
     monkeypatch.setenv("EQUITY_SCANNER_SERVICE", service)
     monkeypatch.delenv("EQUITY_SCANNER_DISCORD_WEBHOOK_URL", raising=False)
-    with pytest.raises(SystemExit) as exit_info:
+    with pytest.raises(expected_exit) as exit_info:
         production_job.main()
-    return exit_info.value.code, commands, alerts
+    return exit_info.value, commands, alerts
 
 
 def test_failed_scan_posts_alert_with_last_output_line(monkeypatch, tmp_path):
-    code, commands, alerts = _run_main(
+    exit_info, commands, alerts = _run_main(
         monkeypatch,
         tmp_path,
         service="scan",
@@ -68,7 +80,7 @@ def test_failed_scan_posts_alert_with_last_output_line(monkeypatch, tmp_path):
         output="starting\nError response from daemon: No such image: sha256:abc\n\n",
     )
 
-    assert code == 1
+    assert exit_info.code == 1
     assert commands[0][-1] == "scan"
     assert "EQUITY_SCANNER_DISCORD_WEBHOOK_URL" in commands[0]
     [(url, content)] = alerts
@@ -80,20 +92,56 @@ def test_failed_scan_posts_alert_with_last_output_line(monkeypatch, tmp_path):
 
 
 def test_successful_job_does_not_alert(monkeypatch, tmp_path):
-    code, _, alerts = _run_main(monkeypatch, tmp_path, service="scan", returncode=0)
+    exit_info, _, alerts = _run_main(monkeypatch, tmp_path, service="scan", returncode=0)
 
-    assert code == 0
+    assert exit_info.code == 0
     assert alerts == []
 
 
 def test_refresh_gets_no_notification_settings_but_alerts_on_failure(monkeypatch, tmp_path):
-    code, commands, alerts = _run_main(
+    exit_info, commands, alerts = _run_main(
         monkeypatch, tmp_path, service="refresh-universes", returncode=3
     )
 
-    assert code == 3
+    assert exit_info.code == 3
     assert commands[0][-1] == "refresh-universes"
     assert not any("DISCORD" in part or "SEC_USER_AGENT" in part for part in commands[0])
     [(_, content)] = alerts
     assert "`refresh-universes` failed" in content
     assert "production-refresh.log" in content
+
+
+def test_missing_equity_webhook_alerts_through_fallback_webhook(monkeypatch, tmp_path):
+    exit_info, commands, alerts = _run_main(
+        monkeypatch,
+        tmp_path,
+        service="scan",
+        returncode=0,
+        external_env=(
+            "DISCORD_WEBHOOK_URL=https://example.invalid/general\n"
+            "SEC_USER_AGENT=Scanner ops@example.invalid\n"
+        ),
+        expected_exit=ValueError,
+    )
+
+    assert "destination is missing" in str(exit_info)
+    assert commands == []
+    [(url, content)] = alerts
+    assert url == "https://example.invalid/general"
+    assert "`scan` did not run" in content
+    assert "destination is missing" in content
+    assert "external.env" in content
+
+
+def test_missing_equity_webhook_without_fallback_still_fails(monkeypatch, tmp_path):
+    _, commands, alerts = _run_main(
+        monkeypatch,
+        tmp_path,
+        service="scan",
+        returncode=0,
+        external_env="SEC_USER_AGENT=Scanner ops@example.invalid\n",
+        expected_exit=ValueError,
+    )
+
+    assert commands == []
+    assert alerts == []
