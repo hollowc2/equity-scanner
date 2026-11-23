@@ -1,13 +1,13 @@
 """Gateway-backed implementation of ButterflyGuy's PriceHistoryProvider/
 MarketMoversProvider Protocols (see Butterflyguy/src/butterfly_guy/data/providers.py).
 
-Only the two surfaces equity_scan actually needs: daily bars (for rvol/prior-day-change)
-and market movers. Not a general-purpose gateway client wrapper.
+Exposes the scanner's quote, candle and mover reads.
 """
 
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import logging
 from dataclasses import dataclass, replace
 from typing import Any, Literal
@@ -20,6 +20,7 @@ from schwab_gateway_sdk.client import (
     GatewayTimeoutError,
     GatewayUnavailableError,
 )
+from schwab_gateway_sdk.models import OptionChainV1
 
 log = logging.getLogger(__name__)
 
@@ -145,18 +146,9 @@ class GatewayEquityDataProvider:
         task = self._daily_bars_tasks.get(key)
         if task is None:
 
-            async def _load() -> tuple[dict, ...]:
-                response = await self._retry(
-                    lambda: self._client.get_history(
-                        _gateway_symbol(symbol),
-                        frequency="daily",
-                        days_back=days_back,
-                    )
-                )
-                self._require_fresh(response.history, f"history for {symbol}")
-                return tuple(_bar_to_candle(bar) for bar in response.history.bars)
-
-            task = asyncio.create_task(_load())
+            task = asyncio.create_task(
+                self._load_history(symbol, frequency="daily", days_back=days_back)
+            )
             self._daily_bars_tasks[key] = task
 
         try:
@@ -166,6 +158,28 @@ class GatewayEquityDataProvider:
                 self._daily_bars_tasks.pop(key, None)
             raise
         return [dict(bar) for bar in bars]
+
+    async def get_minute_bars(self, symbol: str) -> list[dict]:
+        return list(await self._load_history(symbol, frequency="minute", days_back=1))
+
+    async def get_option_chain(self, symbol: str, expiration: dt.date) -> OptionChainV1:
+        response = await self._client.get_option_chain(_gateway_symbol(symbol), expiration)
+        chain = response.option_chain
+        if chain.symbol != _gateway_symbol(symbol) or chain.expiration != expiration:
+            raise GatewayResponseError("gateway option-chain identity does not match the request")
+        self._require_fresh(chain, f"option chain for {symbol}")
+        return chain
+
+    async def _load_history(
+        self, symbol: str, *, frequency: Literal["daily", "minute"], days_back: int | None
+    ) -> tuple[dict, ...]:
+        response = await self._retry(
+            lambda: self._client.get_history(
+                _gateway_symbol(symbol), frequency=frequency, days_back=days_back
+            )
+        )
+        self._require_fresh(response.history, f"history for {symbol}")
+        return tuple(_bar_to_candle(bar) for bar in response.history.bars)
 
     async def get_equity_quotes(
         self,

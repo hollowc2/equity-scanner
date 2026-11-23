@@ -35,9 +35,9 @@ async def test_run_scan_skips_market_holiday_before_gateway(monkeypatch):
     assert messages == []
 
 
-@pytest.mark.parametrize("dry_run", [True, False])
+@pytest.mark.parametrize(("dry_run", "trade_setups"), [(True, False), (False, False), (True, True)])
 async def test_run_scan_persists_phase_timings_with_fake_boundaries(
-    monkeypatch, tmp_path, dry_run
+    monkeypatch, tmp_path, dry_run, trade_setups
 ):
     generated_at = dt.datetime(2026, 8, 26, 8, 0, tzinfo=EASTERN)
     now_utc = generated_at.astimezone(dt.timezone.utc)
@@ -85,7 +85,9 @@ async def test_run_scan_persists_phase_timings_with_fake_boundaries(
             concurrency=4,
             max_unquotable_symbols=0,
         ):
-            assert max_unquotable_symbols == run.MAX_UNQUOTABLE_SCAN_SYMBOLS
+            assert max_unquotable_symbols == (
+                1 if "$VIX" in symbols else run.MAX_UNQUOTABLE_SCAN_SYMBOLS
+            )
             quotes = await self.get_equity_quotes(symbols, batch_size=batch_size)
             ordered = tuple(dict.fromkeys(symbols))
             return QuoteCollection(
@@ -138,6 +140,7 @@ async def test_run_scan_persists_phase_timings_with_fake_boundaries(
         universe_dir=str(tmp_path),
         custom_watchlist=str(tmp_path / "custom.txt"),
         report_dir=str(tmp_path / "reports"),
+        closes_dir=str(tmp_path / "closes"),
         context_symbols=["SPY"],
         filters={"min_rvol": 0.0},
         rvol_lookback_days=2,
@@ -161,10 +164,29 @@ async def test_run_scan_persists_phase_timings_with_fake_boundaries(
             posted.extend(messages)
 
     monkeypatch.setattr(run, "DiscordNotifier", FakeNotifier)
-    messages = await run.run_scan(scan_config_path="unused.yaml", dry_run=dry_run)
+    report_dir = tmp_path / "reports"
+    morning_report = report_dir / "2026-08-26.json"
+    if trade_setups:
+        report_dir.mkdir()
+        morning_report.write_text("existing morning report")
+    messages = await run.run_scan(
+        scan_config_path="unused.yaml", dry_run=dry_run, trade_setups=trade_setups
+    )
     assert posted == ([] if dry_run else messages)
 
-    payload = json.loads((tmp_path / "reports" / "2026-08-26.json").read_text())
+    if trade_setups:
+        assert morning_report.read_text() == "existing morning report"
+        (archive,) = report_dir.glob("*_trade-setups.json")
+        assert archive.with_suffix(".md").exists()
+        payload = json.loads(archive.read_text())
+        assert payload["trade_setups"]["vix"]["level"] == 105.0
+        assert payload["trade_setups"]["daily_coverage"]["unavailable"] == ["AAPL"]
+        assert payload["trade_setups"]["intraday_status"] == "outside the cash session"
+        assert "SPX and volatility" in "\n".join(messages)
+        assert "trade_setups" in payload["phase_timings_ms"]
+    else:
+        payload = json.loads(morning_report.read_text())
+        assert "trade_setups" not in payload
     snapshot = payload["opening_focus"][0]["snapshot"]
     assert snapshot["prior_day_pct"] == 5.0
     assert snapshot["avg_volume_20d"] == 1_050_000

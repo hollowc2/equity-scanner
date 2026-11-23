@@ -115,11 +115,16 @@ def main() -> None:
     command += [service, *sys.argv[1:]]
     returncode, last_line = _run_streaming(command, cwd=root, env=env)
     if returncode != 0:
+        log_path = (
+            "reports/production-spx-snapshot.log"
+            if service == "scan" and "--spx-snapshot" in sys.argv[1:]
+            else SERVICE_LOGS[service]
+        )
         detail = f"\n`{last_line[:300]}`" if last_line else ""
         post_failure_alert(
             notifications["EQUITY_SCANNER_DISCORD_WEBHOOK_URL"],
             f"⚠️ equity-scanner `{service}` failed on {socket.gethostname()} "
-            f"(exit {returncode}); see {root / SERVICE_LOGS[service]}{detail}",
+            f"(exit {returncode}); see {root / log_path}{detail}",
         )
     raise SystemExit(returncode)
 

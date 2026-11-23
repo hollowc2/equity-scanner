@@ -24,6 +24,7 @@ def _run_wrapper(
     local_time: str,
     docker_status: int = 0,
     hold_lock: bool = False,
+    args: tuple[str, ...] = (),
 ) -> tuple[subprocess.CompletedProcess[str], str]:
     scanner_root = tmp_path / "scanner"
     scanner_root.mkdir()
@@ -71,7 +72,7 @@ def _run_wrapper(
         fcntl.flock(lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
     try:
         result = subprocess.run(
-            [str(REPO / "tools" / wrapper)],
+            [str(REPO / "tools" / wrapper), *args],
             env=env,
             text=True,
             capture_output=True,
@@ -182,6 +183,20 @@ def test_production_wrappers_select_release_and_production_compose(
     assert "compose -f compose.production.yml run --rm" in invocation
     assert "production@sha256:abc" in invocation
     assert service in invocation
+
+
+@pytest.mark.parametrize(("time", "runs"), [("07:00", True), ("06:00", False)])
+def test_production_spx_snapshot_has_its_own_slot(tmp_path, monkeypatch, time, runs):
+    result, invocation = _run_wrapper(
+        tmp_path, monkeypatch, "run_production_scan_cron.sh",
+        weekday="3", local_time=time, args=("--spx-snapshot",),
+    )
+    assert result.returncode == 0
+    assert bool(invocation) is runs
+    if runs:
+        assert "scan --scan-config /app/configs/equity_scan.production.yaml --spx-snapshot" in (
+            invocation
+        )
 
 
 def test_production_mounts_limit_universe_writes_to_refresh():
