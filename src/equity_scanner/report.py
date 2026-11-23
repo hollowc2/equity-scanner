@@ -23,6 +23,7 @@ from equity_scanner.scanner import (
     mover_symbol,
 )
 from equity_scanner.time_utils import EASTERN
+from equity_scanner.trade_setups import MarketBreadth, SetupCoverage, TapeQuote, TradeSetupResults
 
 DISCORD_CHAR_LIMIT = 1900
 
@@ -292,13 +293,108 @@ def _format_header(
 ) -> str:
     universe_labels = [_UNIVERSE_LABELS.get(u, u) for u in settings.universes]
     tape = _format_market_context(results.market_context)
+    title = "Equity Setup Scan" if results.trade_setups is not None else "Morning Equity Scan"
     return (
-        f"## 📈 Morning Equity Scan · {ts.strftime('%a %b %d')}\n"
+        f"## 📈 {title} · {ts.strftime('%a %b %d')}\n"
         f"**Tape:** {tape}\n"
         f"-# {ts.strftime('%I:%M %p').lstrip('0')} ET · "
         f"scanned {results.scanned_symbols:,} names ({', '.join(universe_labels)}) "
         f"· {results.matched_symbols:,} passed filters"
     )
+
+
+def _clock(timestamp: str) -> str:
+    return dt.datetime.fromisoformat(timestamp).strftime("%H:%M ET")
+
+
+def _format_tape_quote(label: str, quote: TapeQuote | None) -> str:
+    if quote is None:
+        return f"**{label}** · fresh quote unavailable"
+    observed = _clock(quote.observed_at)
+    if quote.prior_session:
+        date = dt.datetime.fromisoformat(quote.observed_at).date()
+        observed = f"prior session print · {date.isoformat()} {observed}"
+    return (
+        f"**{label}** {quote.level:,.2f} · {_fmt_pct(quote.change_pct)} · {observed}"
+    )
+
+
+def _format_setup_coverage(coverage: SetupCoverage, matched: int, shown: int) -> str:
+    text = f"{coverage.evaluated}/{coverage.requested} candidates evaluated · {matched} matched"
+    if matched > shown:
+        text += f" · top {shown} shown"
+    if coverage.unavailable:
+        text += f" · {len(coverage.unavailable)} with missing or unusable history"
+    return f"-# {text}"
+
+
+def format_market_breadth(breadth: MarketBreadth) -> str:
+    fresh = breadth.advances + breadth.declines + breadth.unchanged
+    return (
+        f"**S&P 500 breadth** · {breadth.advances} up / {breadth.declines} down "
+        f"/ {breadth.unchanged} flat · {fresh}/{breadth.total} fresh quotes"
+    )
+
+
+def _format_trade_setups(setups: TradeSetupResults, limit: int) -> list[str]:
+    market = [_format_tape_quote("SPX", setups.spx), _format_tape_quote("VIX", setups.vix)]
+    if (tape := setups.spy_tape) is not None:
+        market.append(
+            f"**SPY proxy** · {tape.direction} · {_clock(tape.as_of)}\n"
+            f"SPY {tape.close:.2f} · 10m {_fmt_pct(tape.prior_10m_pct)} "
+            f"· est. VWAP {tape.vwap:.2f} "
+            f"· 15m opening range {tape.opening_low:.2f}–{tape.opening_high:.2f}"
+        )
+    else:
+        market.append(f"**SPY proxy** · {setups.spy_status}")
+    if (breadth := setups.breadth) is not None:
+        market.append(format_market_breadth(breadth))
+
+    dips = []
+    for dip in setups.daily_dips[:limit]:
+        volume = (
+            f" · {dip.volume_multiple:.1f}× avg volume" if dip.volume_multiple is not None else ""
+        )
+        dips.append(
+            f"**{dip.symbol}** · {dip.status} · {dip.selloff_date} selloff "
+            f"{_fmt_pct(dip.change_pct)} · {dip.atr_multiple:.1f}× ATR{volume} "
+            f"· low {_fmt_price(dip.selloff_low)} · high {_fmt_price(dip.selloff_high)}"
+        )
+    if not dips:
+        if setups.daily_coverage.evaluated:
+            dips.append("_No daily dip setups in the evaluated candidates._")
+        elif setups.daily_coverage.requested:
+            dips.append("_Daily history unavailable for the selected candidates._")
+        else:
+            dips.append("_No eligible daily candidates._")
+    dips.append(_format_setup_coverage(setups.daily_coverage, len(setups.daily_dips), limit))
+
+    flushes = [
+        f"**{signal.symbol}** · {signal.status} · {_clock(signal.observed_end)} · "
+        f"flush {_clock(signal.flush_end)} · low {_fmt_price(signal.flush_low)} "
+        f"({_fmt_pct(signal.low_vs_prior_close_pct)} vs prior close) "
+        f"· high {_fmt_price(signal.flush_high)} · {signal.volume_multiple:.1f}× median vol "
+        f"· {signal.range_multiple:.1f}× median range"
+        for signal in setups.capitulations[:limit]
+    ]
+    if setups.intraday_status == "screened":
+        if not flushes:
+            flushes.append(
+                "_No active 2-minute flushes in the evaluated candidates._"
+                if setups.intraday_coverage.evaluated
+                else "_Minute history unavailable for the selected candidates._"
+            )
+        flushes.append(
+            _format_setup_coverage(setups.intraday_coverage, len(setups.capitulations), limit)
+        )
+    else:
+        flushes.append(f"_{setups.intraday_status.capitalize()}._")
+
+    return [
+        _format_section("**SPX and volatility**", market, empty_text=""),
+        _format_section("**Daily dip watch**", dips, empty_text=""),
+        _format_section("**2-minute capitulation**", flushes, empty_text=""),
+    ]
 
 
 def build_report(
@@ -312,6 +408,10 @@ def build_report(
     header = _format_header(results, settings=settings, ts=ts)
 
     sections: list[str] = []
+    if results.trade_setups is not None:
+        sections.extend(
+            _format_trade_setups(results.trade_setups, settings.trade_setups.report_limit)
+        )
     group_by_sector = settings.group_by_sector
     top = [item for item in results.opening_focus if item.headline]
     rest = [item for item in results.opening_focus if not item.headline]
@@ -438,9 +538,10 @@ def archive_report(
     *,
     report_dir: str,
     generated_at: dt.datetime,
+    filename_stem: str | None = None,
 ) -> Path:
     """Write the scan report to a dated markdown file under report_dir."""
-    path = Path(report_dir) / f"{generated_at.strftime('%Y-%m-%d')}.md"
+    path = Path(report_dir) / f"{filename_stem or generated_at.date().isoformat()}.md"
     atomic_write_text(path, "\n\n---\n\n".join(messages) + "\n")
     return path
 
@@ -450,10 +551,13 @@ def archive_report_json(
     *,
     report_dir: str,
     generated_at: dt.datetime,
+    filename_stem: str | None = None,
 ) -> Path:
     """Write machine-readable scan internals next to the markdown report."""
-    path = Path(report_dir) / f"{generated_at.strftime('%Y-%m-%d')}.json"
+    path = Path(report_dir) / f"{filename_stem or generated_at.date().isoformat()}.json"
     payload = asdict(results)
+    if results.trade_setups is None:
+        payload.pop("trade_setups")
     payload["generated_at"] = generated_at.isoformat()
     atomic_write_text(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
     return path

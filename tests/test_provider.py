@@ -95,6 +95,10 @@ async def gateway_client():
         captured["last"] = request
         if request.url.path == "/v1/history":
             captured["history_calls"] += 1
+            if request.url.params["frequency"] == "minute":
+                return httpx.Response(
+                    200, json={"history": {**HISTORY_PAYLOAD["history"], "frequency": "minute"}}
+                )
             return httpx.Response(200, json=HISTORY_PAYLOAD)
         if request.url.path == "/v1/movers":
             return httpx.Response(200, json=MOVERS_PAYLOAD)
@@ -121,6 +125,18 @@ async def test_get_daily_bars_converts_gateway_bars_to_candle_dicts(gateway_clie
     assert isinstance(candles[0]["datetime"], int)
     assert captured["last"].url.params["frequency"] == "daily"
     assert captured["last"].url.params["days_back"] == "20"
+
+
+async def test_get_minute_bars_uses_the_pinned_sdk_history_route(gateway_client) -> None:
+    client, captured = gateway_client
+    provider = GatewayEquityDataProvider(client)
+
+    candles = await provider.get_minute_bars("BRK.B")
+
+    assert len(candles) == 3
+    assert dict(captured["last"].url.params) == {
+        "symbol": "BRK/B", "frequency": "minute", "days_back": "1",
+    }
 
 
 async def test_get_daily_bars_coalesces_and_caches_identical_windows(gateway_client) -> None:

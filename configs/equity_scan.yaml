@@ -39,6 +39,10 @@ news:
   alpha_vantage_request_concurrency: 4
 
 batch_size: 100
+trade_setups:
+  daily_candidates: 24
+  intraday_candidates: 16
+  report_limit: 6
 rvol_lookback_days: 20
 rvol_fetch_concurrency: 4
 group_by_sector: true

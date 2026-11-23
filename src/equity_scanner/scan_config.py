@@ -71,6 +71,12 @@ class EquityNewsSettings(BaseModel):
     alpha_vantage_request_concurrency: int = Field(default=4, ge=1, le=10)
 
 
+class TradeSetupSettings(BaseModel):
+    daily_candidates: int = Field(default=24, ge=1, le=100)
+    intraday_candidates: int = Field(default=16, ge=1, le=100)
+    report_limit: int = Field(default=6, ge=1, le=20)
+
+
 class EquityScanSettings(BaseModel):
     universes: list[Literal["sp500", "nq100", "liquid", "custom"]] = Field(
         default_factory=lambda: ["sp500", "nq100", "liquid", "custom"]
@@ -80,6 +86,7 @@ class EquityScanSettings(BaseModel):
     filters: EquityScanFilters = Field(default_factory=EquityScanFilters)
     limits: EquityScanLimits = Field(default_factory=EquityScanLimits)
     news: EquityNewsSettings = Field(default_factory=EquityNewsSettings)
+    trade_setups: TradeSetupSettings = Field(default_factory=TradeSetupSettings)
     batch_size: int = 100
     quote_fetch_concurrency: int = Field(default=4, ge=1, le=4)
     rvol_lookback_days: int = 20

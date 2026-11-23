@@ -36,7 +36,9 @@ from equity_scanner.scanner import (
     parse_market_context,
     rank_scan_results,
 )
+from equity_scanner.spx_snapshot import run_spx_snapshot
 from equity_scanner.time_utils import is_premarket_window, is_trading_day, now_eastern
+from equity_scanner.trade_setups import scan_trade_setups
 from equity_scanner.universes import (
     build_symbol_map,
     load_liquid_meta,
@@ -96,6 +98,7 @@ async def run_scan(
     scan_config_path: str = "configs/equity_scan.yaml",
     dry_run: bool = False,
     open_scan: bool = False,
+    trade_setups: bool = False,
 ) -> list[str]:
     generated_at = now_eastern()
     if not is_trading_day(generated_at.date()):
@@ -149,6 +152,15 @@ async def run_scan(
         phase_started = time.perf_counter()
         context_quotes = await provider.get_equity_quotes(scan_config.context_symbols)
         _record_phase(phase_timings_ms, "context_quotes", phase_started)
+        setup_quotes = context_quotes
+        if trade_setups and "$VIX" not in context_quotes:
+            # Partial quote batches require at least one returned symbol.
+            optional_quotes = await provider.get_equity_quote_collection(
+                ["SPY", "$VIX"], max_unquotable_symbols=1,
+            )
+            if "$VIX" in optional_quotes.quotes:
+                setup_quotes = {**context_quotes, "$VIX": optional_quotes.quotes["$VIX"]}
+        setup_as_of = now_eastern() if trade_setups else generated_at
         liquid_meta = load_liquid_meta(scan_config.universe_dir)
         sector_map = load_sector_map(scan_config.universe_dir, liquid_meta=liquid_meta)
         reference_prices = {
@@ -314,6 +326,21 @@ async def run_scan(
             )
         log.info("equity_scan_prior_day_changes_loaded symbols=%d", known_prior_day)
 
+        setups = None
+        if trade_setups:
+            phase_started = time.perf_counter()
+            setups = await scan_trade_setups(
+                provider,
+                snapshots,
+                quotes=quotes,
+                context_quotes=setup_quotes,
+                sp500_symbols=[symbol for symbol, names in symbol_map.items() if "sp500" in names],
+                known_prior_day={**closes_prior_day, **prior_day_changes},
+                settings=scan_config,
+                as_of=setup_as_of,
+            )
+            _record_phase(phase_timings_ms, "trade_setups", phase_started)
+
         news_symbols = _news_candidate_symbols(snapshots, limit=scan_config.news.max_symbols)
         phase_started = time.perf_counter()
         news_impacts = await fetch_news_impacts(
@@ -383,6 +410,8 @@ async def run_scan(
             bad_data=bad_data,
             quote_coverage=quote_coverage,
         )
+        if setups is not None:
+            results = replace(results, trade_setups=setups)
         _record_phase(phase_timings_ms, "final_ranking", phase_started)
 
         phase_started = time.perf_counter()
@@ -390,10 +419,14 @@ async def run_scan(
         _record_phase(phase_timings_ms, "report", phase_started)
 
         phase_started = time.perf_counter()
+        filename_stem = (
+            generated_at.strftime("%Y-%m-%d_%H%M%S_%f_trade-setups") if trade_setups else None
+        )
         archive_path = archive_report(
             messages,
             report_dir=scan_config.report_dir,
             generated_at=generated_at,
+            filename_stem=filename_stem,
         )
         _record_phase(phase_timings_ms, "markdown_archive", phase_started)
         phase_timings_ms["total_generation"] = round(
@@ -407,6 +440,7 @@ async def run_scan(
             results,
             report_dir=scan_config.report_dir,
             generated_at=generated_at,
+            filename_stem=filename_stem,
         )
         _record_phase(phase_timings_ms, "json_archive", phase_started)
         log.info(
@@ -457,10 +491,21 @@ def main() -> None:
         action="store_true",
         help="Print the report instead of posting to Discord",
     )
-    parser.add_argument(
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument(
         "--open-scan",
         action="store_true",
         help="Include after-open Schwab mover buckets and Opening Focus context",
+    )
+    parser.add_argument(
+        "--trade-setups",
+        action="store_true",
+        help="Add SPX and volatility context, daily dips, and regular-session 2-minute flushes",
+    )
+    modes.add_argument(
+        "--spx-snapshot",
+        action="store_true",
+        help="Run the standalone SPX butterfly market-data snapshot",
     )
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
@@ -472,11 +517,18 @@ def main() -> None:
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
 
+    if args.spx_snapshot:
+        if args.trade_setups:
+            parser.error("--spx-snapshot is a standalone scan")
+        asyncio.run(run_spx_snapshot(args.scan_config, dry_run=args.dry_run))
+        return
+
     asyncio.run(
         run_scan(
             scan_config_path=args.scan_config,
             dry_run=args.dry_run,
             open_scan=args.open_scan,
+            trade_setups=args.trade_setups,
         )
     )
 

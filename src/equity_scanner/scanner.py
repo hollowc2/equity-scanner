@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import datetime as dt
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from schwab_gateway_sdk import QuoteV1
 
@@ -30,6 +30,9 @@ from equity_scanner.news import NewsImpact
 from equity_scanner.scan_config import EquityScanSettings
 from equity_scanner.time_utils import is_market_open, is_premarket_window
 from equity_scanner.volume import compute_rvol, todays_premarket_volume
+
+if TYPE_CHECKING:
+    from equity_scanner.trade_setups import TradeSetupResults
 
 INDEX_UNIVERSES = frozenset({"sp500", "nq100"})
 # Opening Focus never treats premarket volume below this share of 20d avg volume as
@@ -116,6 +119,7 @@ class ScanResults:
     bad_data: list[dict[str, Any]] | None = None
     phase_timings_ms: dict[str, float] | None = None
     quote_coverage: dict[str, Any] | None = None
+    trade_setups: TradeSetupResults | None = None
 
 
 def _as_float(value: Any) -> float | None:
