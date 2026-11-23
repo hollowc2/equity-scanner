@@ -10,7 +10,13 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Awaitable, TypeVar
 
-from schwab_gateway_sdk.client import GatewayResponseError
+from schwab_gateway_sdk import QuoteV1
+from schwab_gateway_sdk.client import (
+    GatewayRateLimitError,
+    GatewayResponseError,
+    GatewayTimeoutError,
+    GatewayUnavailableError,
+)
 from schwab_gateway_sdk.models import OptionChainV1, OptionContractV1
 
 from equity_scanner.closes import previous_trading_day
@@ -21,13 +27,20 @@ from equity_scanner.notifier import DiscordNotifier
 from equity_scanner.provider import GatewayEquityDataProvider, StaleGatewayDataError
 from equity_scanner.report import format_market_breadth
 from equity_scanner.scan_config import load_equity_scan_config
-from equity_scanner.time_utils import EASTERN, MARKET_OPEN, is_market_open, now_eastern
+from equity_scanner.time_utils import (
+    EASTERN,
+    MARKET_OPEN,
+    is_market_open,
+    market_close_time,
+    now_eastern,
+)
 from equity_scanner.trade_setups import (
     MarketBreadth,
     OpeningTape,
     TapeQuote,
     _bar,
     _completed_daily,
+    _fresh_quote,
     _market_breadth,
     _opening_tape,
     _regular_minutes,
@@ -85,6 +98,7 @@ class SpxSnapshot:
     width_context: tuple[WidthContext, ...]
     prior_vix_closes: dict[str, float | None]
     prior_vix1d_vix: float | None
+    prior_vix1d_source: str | None
     prior_vix_vix3m: float | None
     spy_tape: OpeningTape | None
     breadth: MarketBreadth | None
@@ -95,7 +109,14 @@ class SpxSnapshot:
 async def _optional_read(label: str, read: Awaitable[T]) -> T | None:
     try:
         return await read
-    except (GatewayResponseError, StaleGatewayDataError) as exc:
+    except GatewayRateLimitError:
+        raise
+    except (
+        GatewayResponseError,
+        GatewayTimeoutError,
+        GatewayUnavailableError,
+        StaleGatewayDataError,
+    ) as exc:
         log.warning(
             "spx_snapshot_data_unavailable field=%s error_type=%s", label, type(exc).__name__
         )
@@ -110,6 +131,34 @@ def _session_open(candles: list[dict], start: dt.datetime) -> float | None:
 def _previous_close(candles: list[dict], date: dt.date) -> float | None:
     bars = _completed_daily(candles, date)
     return bars[-1].close if bars else None
+
+
+def _vix1d_previous_quote(
+    quote: QuoteV1 | None,
+    prior: dt.date,
+    cutoff: dt.datetime,
+) -> tuple[float | None, str | None]:
+    if quote is None or quote.event_timestamp is None or quote.session != "regular":
+        return None, None
+    if _fresh_quote(quote, cutoff):
+        value = quote.close
+        source = "gateway previous close"
+    else:
+        stamp = quote.event_timestamp.astimezone(EASTERN)
+        closing = dt.datetime.combine(prior, market_close_time(prior), tzinfo=EASTERN)
+        closing += dt.timedelta(minutes=15)
+        if abs(stamp - closing) > dt.timedelta(seconds=90):
+            return None, None
+        value = quote.last
+        source = "prior-session closing print"
+    return (
+        (value, source)
+        if value is not None and math.isfinite(value) and value > 0
+        else (
+            None,
+            None,
+        )
+    )
 
 
 def _gap_status(
@@ -243,8 +292,14 @@ async def collect_spx_snapshot(
     for symbol in ("$SPX", *VOLATILITY_SYMBOLS):
         bars = await _optional_read(symbol, provider.get_daily_bars(symbol, days_back=2))
         prior_closes[symbol] = _previous_close(bars or [], prior)
-    spx_candles = await _optional_read("$SPX minute", provider.get_minute_bars("$SPX"))
-    spy_candles = await _optional_read("SPY minute", provider.get_minute_bars("SPY"))
+    spx_candles = await _optional_read(
+        "$SPX minute",
+        provider.get_session_minute_bars("$SPX", session),
+    )
+    spy_candles = await _optional_read(
+        "SPY minute",
+        provider.get_session_minute_bars("SPY", session),
+    )
     cash_open = _session_open(spx_candles or [], start)
     breadth_quotes = None
     if sp500_symbols:
@@ -257,14 +312,21 @@ async def collect_spx_snapshot(
             ),
         )
     market = await provider.get_equity_quote_collection(
-        ["$SPX", "$VIX", "SPY"],
-        max_unquotable_symbols=1,
+        ["$SPX", "$VIX", "$VIX1D", "SPY"],
+        max_unquotable_symbols=2,
     )
     chain = await _optional_read("SPXW chain", provider.get_option_chain("$SPX", session))
     cutoff = now_eastern()
     spot = _tape_quote(market.quotes.get("$SPX"), cutoff)
     vix = _tape_quote(market.quotes.get("$VIX"), cutoff)
     previous_close = prior_closes.pop("$SPX")
+    vix1d_source = "gateway daily candle" if prior_closes["$VIX1D"] is not None else None
+    if vix1d_source is None:
+        prior_closes["$VIX1D"], vix1d_source = _vix1d_previous_quote(
+            market.quotes.get("$VIX1D"),
+            prior,
+            cutoff,
+        )
     gap, gap_pct, direction, gap_status = _gap_status(cash_open, previous_close, spot)
     spx_minutes = _regular_minutes(spx_candles or [], start, cutoff)
     gap_filled = None
@@ -296,6 +358,7 @@ async def collect_spx_snapshot(
         width_context=widths,
         prior_vix_closes=prior_closes,
         prior_vix1d_vix=prior_vix1d / prior_vix if prior_vix1d and prior_vix else None,
+        prior_vix1d_source=vix1d_source,
         prior_vix_vix3m=prior_vix / prior_vix3m if prior_vix and prior_vix3m else None,
         spy_tape=_opening_tape(_regular_minutes(spy_candles or [], start, cutoff)),
         breadth=_market_breadth(
@@ -336,6 +399,8 @@ def format_spx_snapshot(result: SpxSnapshot) -> str:
         lines.append(
             f"-# VIX print {dt.datetime.fromisoformat(result.vix.observed_at):%H:%M:%S ET}"
         )
+    if result.prior_vix1d_source:
+        lines.append(f"-# Prior VIX1D source · {result.prior_vix1d_source}")
     if result.spy_tape:
         tape = result.spy_tape
         lines.append(f"**SPY proxy** · {tape.direction} · est. VWAP {tape.vwap:.2f}")

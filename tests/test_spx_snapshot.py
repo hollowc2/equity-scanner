@@ -4,7 +4,7 @@ from contextlib import nullcontext
 
 import httpx
 import pytest
-from schwab_gateway_sdk import GatewayMarketDataClient
+from schwab_gateway_sdk import GatewayMarketDataClient, QuoteV1
 
 from equity_scanner import spx_snapshot
 from equity_scanner.provider import GatewayEquityDataProvider
@@ -52,19 +52,9 @@ async def test_snapshot_matches_open_and_volatility_rules_through_pinned_sdk(mon
         calls.append(path)
         symbol = query.get("symbol")
         if path == "/v1/history":
-            if query["frequency"] == "daily":
-                close = {"$SPX": 6000, "$VIX": 16, "$VIX1D": 18, "$VIX3M": 20}[symbol]
-                bars = [_bar(PRIOR, close), _bar(NOW, 300)]
-            else:
-                bars = [
-                    _bar(
-                        OPEN + dt.timedelta(minutes=minute),
-                        6005 if symbol == "$SPX" else 600,
-                    )
-                    for minute in range(30)
-                ]
-                if symbol == "$SPX":
-                    bars[0] = _bar(OPEN, 6005, open_=6010, low=5999)
+            assert query["frequency"] == "daily"
+            close = {"$SPX": 6000, "$VIX": 16, "$VIX3M": 20}.get(symbol)
+            bars = [_bar(PRIOR, close), _bar(NOW, 300)] if close else []
             return httpx.Response(
                 200,
                 json={
@@ -72,6 +62,29 @@ async def test_snapshot_matches_open_and_volatility_rules_through_pinned_sdk(mon
                         "symbol": symbol,
                         "frequency": query["frequency"],
                         "bars": bars,
+                        "gateway_received_at": stamp,
+                        "source": "fixture",
+                        "stale": False,
+                    }
+                },
+            )
+        if path == "/v1/session-history":
+            assert query["date"] == NOW.date().isoformat()
+            assert query["session"] == "regular"
+            bars = [
+                _bar(OPEN + dt.timedelta(minutes=minute), 6005 if symbol == "$SPX" else 600)
+                for minute in range(30)
+            ]
+            if symbol == "$SPX":
+                bars[0] = _bar(OPEN, 6005, open_=6010, low=5999)
+            return httpx.Response(
+                200,
+                json={
+                    "session_history": {
+                        "symbol": symbol,
+                        "date": query["date"],
+                        "session": "regular",
+                        "candles": bars,
                         "gateway_received_at": stamp,
                         "source": "fixture",
                         "stale": False,
@@ -90,7 +103,8 @@ async def test_snapshot_matches_open_and_volatility_rules_through_pinned_sdk(mon
                     "last": price,
                     "close": price - 1,
                 }
-                for key, price in (("$SPX", 6005), ("$VIX", 17), ("SPY", 600))
+                for key, price in (("$SPX", 6005), ("$VIX", 17), ("SPY", 600), ("$VIX1D", 19))
+                if key in query["symbols"].split(",")
             ]
             return httpx.Response(200, json={"quotes": quotes, "missing_symbols": []})
         assert path == "/v1/option-chain"
@@ -141,7 +155,8 @@ async def test_snapshot_matches_open_and_volatility_rules_through_pinned_sdk(mon
         )
         await spx_snapshot.run_spx_snapshot("unused", dry_run=True)
 
-    assert calls.count("/v1/history") == 12
+    assert calls.count("/v1/history") == 8
+    assert calls.count("/v1/session-history") == 4
     assert calls.count("/v1/option-chain") == 2
     (archive,) = (tmp_path / "spx_snapshots").glob("*.json")
     assert json.loads(archive.read_text())["breadth"]["advances"] == 3
@@ -160,6 +175,7 @@ async def test_snapshot_matches_open_and_volatility_rules_through_pinned_sdk(mon
     assert first.sample.midpoint == pytest.approx(1.0)
     assert first.sample.ask_premium_pct == pytest.approx(40.0)
     assert snapshot.prior_vix1d_vix == 1.125
+    assert snapshot.prior_vix1d_source == "gateway previous close"
     assert snapshot.prior_vix_vix3m == 0.8
     assert snapshot.straddle is not None and snapshot.straddle.midpoint == 39
     assert "0DTE SPXW straddle" in spx_snapshot.format_spx_snapshot(snapshot)
@@ -171,3 +187,23 @@ def test_missing_spot_does_not_hide_the_vix_width_bucket():
     assert bucket == "Goldilocks 2"
     assert move is None
     assert [(item.width, item.target) for item in widths] == [(40, None), (45, None), (50, None)]
+
+
+def test_prior_session_vix1d_fallback_uses_closing_print_and_rejects_an_intraday_print():
+    stamp = PRIOR.replace(hour=16, minute=15)
+    quote = QuoteV1(
+        symbol="$VIX1D",
+        session="regular",
+        event_timestamp=stamp,
+        gateway_received_at=NOW,
+        source="fixture",
+        stale=True,
+        last=18,
+        close=16,
+    )
+    assert spx_snapshot._vix1d_previous_quote(quote, PRIOR.date(), NOW) == (
+        18,
+        "prior-session closing print",
+    )
+    early = quote.model_copy(update={"event_timestamp": stamp.replace(hour=15)})
+    assert spx_snapshot._vix1d_previous_quote(early, PRIOR.date(), NOW) == (None, None)

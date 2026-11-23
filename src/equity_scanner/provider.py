@@ -162,6 +162,17 @@ class GatewayEquityDataProvider:
     async def get_minute_bars(self, symbol: str) -> list[dict]:
         return list(await self._load_history(symbol, frequency="minute", days_back=1))
 
+    async def get_session_minute_bars(self, symbol: str, date: dt.date) -> list[dict]:
+        gateway_symbol = _gateway_symbol(symbol)
+        response = await self._retry(
+            lambda: self._client.get_session_history(gateway_symbol, date, session="regular")
+        )
+        history = response.session_history
+        if (history.symbol, history.date, history.session) != (gateway_symbol, date, "regular"):
+            raise GatewayResponseError("gateway session history does not match the request")
+        self._require_fresh(history, f"session history for {symbol}")
+        return [_bar_to_candle(bar) for bar in history.candles]
+
     async def get_option_chain(self, symbol: str, expiration: dt.date) -> OptionChainV1:
         response = await self._client.get_option_chain(_gateway_symbol(symbol), expiration)
         chain = response.option_chain

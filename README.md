@@ -88,8 +88,9 @@ daily VIX-based move estimate, active wing widths, and target centers.
 Same-day SPXW quotes show the nearest ATM straddle and a quoted example
 near each target center, with leg-derived midpoint, ask, and ask premium.
 The examples use fresh quotes and represent pricing context. The snapshot
-also shows prior-session VIX1D/VIX and VIX/VIX3M when the exact dates match.
-Missing inputs are shown as unavailable.
+also shows prior-session VIX1D/VIX and VIX/VIX3M. When VIX1D daily history
+is empty, it labels the gateway prior close or prior-session closing print
+used instead. Missing inputs are shown as unavailable.
 
 The production schedule adds a report at 10:00 a.m. ET on trading days.
 The CLI archives timestamped reports under `spx_snapshots/` in the
