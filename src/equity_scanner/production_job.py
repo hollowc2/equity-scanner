@@ -22,12 +22,8 @@ SERVICE_LOGS = {
 }
 
 
-def notification_environment(path: Path) -> dict[str, str]:
-    names = {
-        "EQUITY_DISCORD_WEBHOOK_URL": "EQUITY_SCANNER_DISCORD_WEBHOOK_URL",
-        "SEC_USER_AGENT": "SEC_USER_AGENT",
-        "ALPHA_VANTAGE_API_KEY": "ALPHA_VANTAGE_API_KEY",
-    }
+def _read_settings(path: Path, names: dict[str, str]) -> dict[str, str]:
+    """Read only the named settings from a dotenv file, renamed per `names`."""
     result = {}
     for line in path.read_text().splitlines():
         match = re.match(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z_0-9]*)\s*=\s*(.*)$", line)
@@ -45,9 +41,28 @@ def notification_environment(path: Path) -> dict[str, str]:
         else:
             value = re.split(r"\s+#", value, maxsplit=1)[0].rstrip()
         result[names[match[1]]] = value
+    return result
+
+
+def notification_environment(path: Path) -> dict[str, str]:
+    result = _read_settings(path, {
+        "EQUITY_DISCORD_WEBHOOK_URL": "EQUITY_SCANNER_DISCORD_WEBHOOK_URL",
+        "SEC_USER_AGENT": "SEC_USER_AGENT",
+        "ALPHA_VANTAGE_API_KEY": "ALPHA_VANTAGE_API_KEY",
+    })
     if not result.get("EQUITY_SCANNER_DISCORD_WEBHOOK_URL"):
         raise ValueError("External equity Discord destination is missing")
     return result
+
+
+def fallback_alert_webhook(path: Path) -> str | None:
+    """The notification file's general webhook, used only to report that the
+    equity settings themselves are unusable (otherwise that failure is silent)."""
+    try:
+        settings = _read_settings(path, {"DISCORD_WEBHOOK_URL": "DISCORD_WEBHOOK_URL"})
+    except (OSError, ValueError):
+        return None
+    return settings.get("DISCORD_WEBHOOK_URL") or None
 
 
 def post_failure_alert(webhook_url: str, content: str) -> None:
@@ -97,9 +112,20 @@ def main() -> None:
     if service not in SERVICE_LOGS:
         raise SystemExit(f"Unknown equity-scanner service: {service}")
     env = dict(os.environ)
-    notifications = notification_environment(Path(env.get(
+    notification_path = Path(env.get(
         "EQUITY_SCANNER_NOTIFICATION_ENV", "/opt/butterflyguy/.env"
-    )))
+    ))
+    try:
+        notifications = notification_environment(notification_path)
+    except (OSError, ValueError) as exc:
+        fallback = fallback_alert_webhook(notification_path)
+        if fallback:
+            post_failure_alert(
+                fallback,
+                f"⚠️ equity-scanner `{service}` did not run on {socket.gethostname()}: "
+                f"{exc} ({type(exc).__name__}) in {notification_path}",
+            )
+        raise
     command = ["docker", "compose", "-f", "compose.production.yml", "run", "--rm"]
     command += ["-e", "SCHWAB_GATEWAY_URL=" + env.get(
         "EQUITY_SCANNER_GATEWAY_URL", "http://127.0.0.1:8011"
